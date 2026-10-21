@@ -1,0 +1,20 @@
+{
+ "X": "2026-08-18",
+ "last_included_entry": "2026-08-14",
+ "last_kept_signal_date": "2026-08-14",
+ "retrain_months": [
+  "2026-01",
+  "2026-02",
+  "2026-03",
+  "2026-04",
+  "2026-05",
+  "2026-06",
+  "2026-07",
+  "2026-08"
+ ],
+ "filter_days": 137,
+ "filter_signal_candidates": 41785,
+ "dropped_filter_rows": 1749,
+ "eval_window_rows": 53622,
+ "crossing_trades": 14
+}

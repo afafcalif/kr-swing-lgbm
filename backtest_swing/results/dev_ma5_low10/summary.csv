@@ -1,0 +1,4 @@
+﻿method,trades,trades_per_month,win_rate_pct,avg_win_pct,avg_loss_pct,expectancy_pct,total_return_pct,cagr_pct,mdd_pct,kospi_pct,deposit_pct,avg_positions,median_days_held,median_stop_dist_pct,over_10d_trades,over_10d_expectancy_pct,over_10d_win_rate_pct,exit_stop_pct,exit_trend_pct,exit_time_pct,exit_end_pct,skip_no_slot,skip_already_held,skip_halted,skip_limit_up_open,skip_open_below_stop,skip_too_expensive,raw_signals,signals_per_month,signal_close_below_ma5_pct
+A 20일선 눌림,1154,19.23,31.0,7.75,-5.25,-1.218,-94.8,-44.71,-94.99,43.12,19.87,2.85,2.0,-10.58,25,23.965,100.0,10.1,89.6,0.1,0.3,60488,174,1,0,23,692,62584,1043.1,54.4
+B 60일 신고가 돌파,842,14.03,26.1,13.73,-8.6,-2.764,-98.91,-59.55,-99.48,43.12,19.87,2.84,4.0,-30.71,27,40.584,96.3,0.5,99.2,0.0,0.4,23555,136,5,0,0,944,25498,425.0,0.0
+C 정배열 기준선,985,16.42,27.1,9.88,-6.92,-2.365,-99.05,-60.66,-99.22,43.12,19.87,2.83,3.0,-21.29,24,31.017,95.8,1.9,97.8,0.0,0.3,11698,1,0,0,1,761,13455,224.2,22.3
