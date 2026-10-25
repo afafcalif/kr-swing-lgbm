@@ -1,0 +1,33 @@
+{
+  "_note": "live/config.json 으로 복사해 PC 마다 경로를 맞춘다 (config.json 이 없으면 이 파일을 쓴다). 경로는 root 기준 상대 경로 또는 절대 경로.",
+  "root": "D:/kr-swing-lgbm",
+  "python": "D:/kr-swing-lgbm/.venv-feat/Scripts/python.exe",
+  "env": "mock",
+  "orders_enabled": false,
+  "allow_prod_orders": false,
+  "log_dir": "logs/exec",
+  "state_dir": "logs/exec/state",
+  "pid_file": "logs/exec/resident.pid",
+  "heartbeat_file": "logs/exec/heartbeat.log",
+  "heartbeat_stale_minutes": 5,
+  "times": {
+    "day_start": "07:00:00",
+    "official_retry_until": "15:00:00",
+    "trend_sell_from": "08:30:00",
+    "trend_sell_until": "08:59:00",
+    "stop_from": "09:00:00",
+    "stop_until": "15:20:00",
+    "data_check": "15:17:00",
+    "no_reload_after": "15:18:00",
+    "snapshot": "15:18:30",
+    "measure_snapshot": "15:20:05",
+    "measure_until": "2026-10-30",
+    "buy_from": "15:21:00",
+    "buy_until": "15:25:00",
+    "no_new_order_after": "15:28:00",
+    "close_check": "15:35:00",
+    "settle": "15:40:00",
+    "after_close": "15:36:00",
+    "day_end": "16:30:00"
+  }
+}

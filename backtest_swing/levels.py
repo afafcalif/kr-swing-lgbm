@@ -23,7 +23,7 @@ B. 라운드 우선형 (RoundFirstDetector)
 미래 정보 차단: 스윙점은 오른쪽 N일이 지나야 확정되므로 날짜 D 의 존에는 D - N 일까지 확정된 것만 쓴다.
 이평선·매물대·머문 날·거래량 봉도 D 까지만 쓴다.
 
-실행 (F:\\stock 에서):
+실행 (저장소 루트에서):
     .venv-feat/Scripts/python.exe backtest_swing/levels.py 005930 2025-06-30
     .venv-feat/Scripts/python.exe backtest_swing/levels.py 005930 2025-06-30 --family B --band 0.02 --min-score 5
 """

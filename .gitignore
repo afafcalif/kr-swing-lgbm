@@ -16,3 +16,11 @@ data/
 __pycache__/
 *.pyc
 .venv*/
+
+# 실행 프로그램 (backtest_swing/live) 이 만드는 것: 로그·상태·모델·PC 별 설정·이전 묶음
+logs/
+models_live/
+dist/
+backtest_swing/live/config.json
+SUBPC_MANIFEST.sha256
+*.zip

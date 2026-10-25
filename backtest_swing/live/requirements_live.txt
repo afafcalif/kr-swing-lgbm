@@ -1,0 +1,12 @@
+# Packages for the resident program (backtest_swing/live). Same versions as the main PC .venv-feat (2026-10-24).
+# Versions are pinned so scores reproduce (frozen-function comparison). Python 3.11 64-bit from python.org (not the Store build).
+# ASCII only: pip reads this file with the locale encoding (cp949 on Korean Windows).
+numpy==1.26.4
+pandas==3.0.0
+pyarrow==23.0.0
+lightgbm==4.6.0
+scipy==1.17.0
+requests==2.32.5
+python-dotenv==1.2.1
+python-dateutil==2.9.0.post0
+tzdata==2025.3
