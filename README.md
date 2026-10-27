@@ -207,7 +207,7 @@ python -m unittest discover -s backtest_swing/live -t backtest_swing/live -p "te
 | 4. 3차 확인 리뷰 | 7 | `test_third.py` |
 | 합 | **54** (덜 막힌 항목 재지적 포함) | |
 
-항목별 기록은 EXEC_SPEC 11E ~ 11H 에 있습니다. 그 전의 GPT 코드 리뷰 반영은 11A ~ 11D 입니다.
+항목별 기록은 EXEC_SPEC 11E ~ 11H 에 있습니다. 그 전의 GPT 코드 리뷰 반영은 11A ~ 11D 입니다. 모의 운영 뒤의 수정과 넓은 리뷰까지 포함한 전체 흐름·대표 사례·목록은 [`docs/PATCH_HISTORY.md`](docs/PATCH_HISTORY.md) 에 있습니다.
 
 **대표 사례**
 
