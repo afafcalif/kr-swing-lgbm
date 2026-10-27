@@ -95,7 +95,7 @@ def update(only=None):
         ix = ix[pd.to_datetime(ix.timestamp) < first_missing]
         print(f"official missing {[str(x.date()) for x in missing_dates]} -> rows from {first_missing.date()} not appended", flush=True)
     print(f"official: {official.date.nunique() if len(official) else 0} days {sorted(official.date.dt.strftime('%Y-%m-%d').unique()) if len(official) else []}", flush=True)
-    adj_parts, raw_parts, flags = [], [], {"adj_changed": [], "no_official": [], "fetch_error": [], "no_new_rows": []}
+    adj_parts, raw_parts, flags = [], [], {"adj_changed": [], "no_official": [], "fetch_error": [], "no_new_rows": [], "missing_row": []}
     for i, code in enumerate(codes):
         try:
             fa = file_last_dates(code)
@@ -118,10 +118,14 @@ def update(only=None):
             pend_a.append(na[na.timestamp >= min(missing_dates)].assign(code=code))
             pend_r.append(nr[nr.timestamp >= min(missing_dates)].assign(code=code))
             na, nr = na[na.timestamp < min(missing_dates)], nr[nr.timestamp < min(missing_dates)]
+        off = off_by.get(code)
+        lack = lacking_rows(off, na.timestamp, last, min(missing_dates) if missing_dates else None)
+        if lack:  # 11K 5: 공식 시세에는 거래가 있는 날인데 우리 일봉(키움)에 그 행이 없음 -> 그 종목은 붙이지 않고 그날 계산에서 제외
+            flags["missing_row"].append([code, lack])
+            continue
         if na.empty:
             flags["no_new_rows"].append(code)
             continue
-        off = off_by.get(code)
         if off is not None:
             na, _ = krx_official.apply_regular_session(na, off)
             nr, _ = krx_official.apply_regular_session(nr, off)
@@ -155,6 +159,18 @@ def update(only=None):
     print(f"data version {v}", flush=True)
     print(json.dumps({k: (v if not isinstance(v, list) or len(v) < 20 else f"{len(v)} items") for k, v in rec.items()},
                      ensure_ascii=False), flush=True)
+
+
+def lacking_rows(off, have, after, before=None):
+    """11K 5: 공식 시세(off: 그 종목, date·volume)에서 거래량 > 0 인 날 중 after 뒤(before 앞)인데 우리 일봉 날짜(have)에 없는 날. 반환 [날짜 문자열]
+    (거래량 0 인 날 = 거래정지 등은 키움 일봉에 없을 수 있고 백테스트 일봉도 같은 출처라 세지 않음)"""
+    if off is None or len(off) == 0:
+        return []
+    o = off[pd.to_numeric(off.volume, errors="coerce").fillna(0) > 0] if "volume" in off else off
+    dates = pd.to_datetime(o.date)
+    dates = dates[(dates > pd.Timestamp(after)) & ((dates < pd.Timestamp(before)) if before is not None else True)]
+    h = set(pd.to_datetime(pd.Series(list(have))))
+    return sorted(str(d.date()) for d in set(dates) - h)
 
 
 def amt20_files(code, day):
@@ -195,6 +211,22 @@ def reapply_official():
     pa = pd.read_parquet(os.path.join(APPEND_DIR, "pending_adj.parquet"))
     pr = pd.read_parquet(os.path.join(APPEND_DIR, "pending_raw.parquet"))
     adj_parts, raw_parts, no_off = [], [], []
+    # 11K 5: 기다리던 날 공식 시세에는 거래가 있는데 보관 행에 없는 종목 -> 붙이지 않고 그날 계산에서 제외 (missing_row)
+    skip = set(u.get("adj_changed", [])) | {c for c, _ in u.get("fetch_error", [])}
+    have_by = {c: set(pd.to_datetime(g.timestamp)) for c, g in pa.groupby("code")}
+    lack = {}
+    # 11K 보완 3 (3): 대상 = 공식 시세에 그날 거래가 있는 종목 중 우리 종목 (대상 종목 목록 + 추가분·보관 행 종목).
+    # 추가분·보관 행에 처음부터 없던 종목도 공식 시세에 거래가 있으면 누락으로 센다 (첫 수집에 통째로 빠진 종목)
+    try:
+        uni = set(sd.universe_codes())
+    except (FileNotFoundError, OSError):  # data 폴더가 없는 환경 (시험·clone 직후)
+        uni = set()
+    tracked = (uni | set(pd.read_parquet(data_file("adj.parquet", APPEND_DIR), columns=["code"]).code) | set(pa.code)) & set(off_by)
+    for code in tracked - skip:
+        x = lacking_rows(off_by.get(code), have_by.get(code, set()), min(miss) - pd.Timedelta(days=1), max(miss) + pd.Timedelta(days=1))
+        if x:
+            lack[code] = x
+    pa, pr = pa[~pa.code.isin(list(lack))], pr[~pr.code.isin(list(lack))]
     for code, na in pa.groupby("code"):
         nr = pr[pr.code == code].drop(columns=["code"])
         na = na.drop(columns=["code"])
@@ -225,6 +257,7 @@ def reapply_official():
     u["dates"] = sorted(pd.to_datetime(adj.timestamp).dt.strftime("%Y-%m-%d").unique().tolist())
     u["official_missing_dates"] = []
     u["no_official"] = sorted(set(u.get("no_official", [])) | set(no_off))
+    u["missing_row"] = sorted([list(x) for x in u.get("missing_row", [])] + [[c, d_] for c, d_ in lack.items()])
     u["adj_rows"] = len(adj)
     u["data_version"] = f"{pd.Timestamp.now():%Y%m%d%H%M%S}|{u['dates'][-1] if u['dates'] else '-'}|missing=-|reapplied"
     u.setdefault("reapplied", []).append({"time": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"), "dates": [str(d.date()) for d in miss],
@@ -233,7 +266,8 @@ def reapply_official():
     v = publish_data({"adj.parquet": adj, "raw.parquet": raw, "index.parquet": ix, "update.json": u}, APPEND_DIR)
     for p_ in ("pending_adj.parquet", "pending_raw.parquet", "pending_index.parquet"):
         os.remove(os.path.join(APPEND_DIR, p_))
-    return {"ok": True, "dates": [str(d.date()) for d in miss], "stocks": len(adj_parts), "no_official": len(no_off), "data_dir_version": v}
+    return {"ok": True, "dates": [str(d.date()) for d in miss], "stocks": len(adj_parts), "no_official": len(no_off), "missing_row": len(lack),
+            "data_dir_version": v}
 
 
 # ---------------------------------------------------------------- 메모리 적재
@@ -247,7 +281,8 @@ def excluded_codes():
     with open(p, encoding="utf-8") as f:
         u = json.load(f)
     return {"adj_changed": sorted(u.get("adj_changed", [])), "no_official": sorted(u.get("no_official", [])),
-            "fetch_error": sorted(c for c, _ in u.get("fetch_error", []))}
+            "fetch_error": sorted(c for c, _ in u.get("fetch_error", [])),
+            "missing_row": sorted(c for c, _ in u.get("missing_row", []))}  # 11K 5: 공식 시세에 있는 날의 일봉 행 없음
 
 
 class Store:

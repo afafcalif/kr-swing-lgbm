@@ -13,6 +13,8 @@ from .config import Settings, get_settings
 from .errors import AuthError, ConfigError, HTTPError
 
 TOKEN_EXPIRY_SKEW_SECONDS = 30
+REFRESH_AHEAD_SECONDS = 1800   # 만료 30분 전부터 미리 갱신 (실패하면 기존 토큰으로 계속)
+RETRY_AFTER_FAIL_SECONDS = 60  # 미리 갱신·발급이 실패하면 이 시간 동안은 다시 발급하지 않고 기존 토큰 (요청마다 기다리지 않게)
 
 
 @dataclass
@@ -34,10 +36,10 @@ class TokenCache:
         if self.path.exists():
             self.path.unlink()
 
-    def is_expired(self, expires_at: float | int | None) -> bool:
+    def is_expired(self, expires_at: float | int | None, skew: float = TOKEN_EXPIRY_SKEW_SECONDS) -> bool:
         if not expires_at:
             return True
-        return time.time() >= float(expires_at) - TOKEN_EXPIRY_SKEW_SECONDS
+        return time.time() >= float(expires_at) - skew
 
 
 class AuthManager:
@@ -46,18 +48,41 @@ class AuthManager:
         self.cache = TokenCache(self.settings.token_cache_path)
         self.session = requests.Session()
         self.logger = logging.getLogger(self.__class__.__name__)
+        self._next_try = 0.0
 
-    def get_token(self, force: bool = False) -> str:
-        cached = self.cache.load()
-        if not force and cached:
-            token = cached.get("access_token")
-            expires_at = cached.get("expires_at")
-            if token and not self.cache.is_expired(expires_at):
+    def get_token(self, force: bool = False, timeout: float | None = None, ahead: float | None = None) -> str:
+        """토큰. 만료 ahead 초(기본 30분) 전부터 미리 다시 발급한다. 발급이 실패하면(timeout 초 제한) 실제 만료 시각 전인 기존 토큰만
+        돌려주고 RETRY_AFTER_FAIL_SECONDS 동안은 다시 발급하지 않는다. 기존 토큰이 만료됐거나 없거나 force 면 시도마다 다시 발급하고
+        실패를 그대로 올린다 (만료 토큰은 쓰지 않음, 60초 억제도 없음)"""
+        cached = self.cache.load() or {}
+        token, expires_at = cached.get("access_token"), cached.get("expires_at")
+        live = bool(token) and time.time() < float(expires_at or 0)  # 실제 만료 시각 전
+        if not force and live:
+            if not self.cache.is_expired(expires_at, REFRESH_AHEAD_SECONDS if ahead is None else ahead):
                 return str(token)
+            if time.time() < self._next_try:
+                return str(token)
+        try:
+            new, new_exp = self._request_token(timeout=timeout)
+        except Exception as e:  # noqa: BLE001
+            if force or not live:
+                raise
+            self._next_try = time.time() + RETRY_AFTER_FAIL_SECONDS
+            self.logger.warning("토큰 미리 갱신 실패 -> 기존 토큰으로 계속 (만료까지 %.0f초): %r", float(expires_at or 0) - time.time(), e)
+            return str(token)
+        self.cache.save({"access_token": new, "expires_at": new_exp})
+        self._next_try = 0.0
+        return new
 
-        token, expires_at = self._request_token()
-        self.cache.save({"access_token": token, "expires_at": expires_at})
-        return token
+    def invalidate(self) -> None:
+        """서버가 인증·토큰으로 거부했을 때: 캐시 토큰을 버려 다음 요청에서 다시 발급"""
+        self.cache.clear()
+        self._next_try = 0.0
+
+    def seconds_left(self) -> float:
+        """캐시된 토큰의 만료까지 남은 초 (없으면 0)"""
+        cached = self.cache.load() or {}
+        return max(float(cached.get("expires_at") or 0) - time.time(), 0.0) if cached.get("access_token") else 0.0
 
     def revoke_token(self) -> None:
         if not self.settings.auth_revoke_path or not self.settings.auth_revoke_method:
@@ -94,7 +119,7 @@ class AuthManager:
         self.cache.clear()
         self.logger.info("Token revoked successfully")
 
-    def _request_token(self) -> tuple[str, float]:
+    def _request_token(self, timeout: float | None = None) -> tuple[str, float]:
         if not self.settings.auth_token_path or not self.settings.auth_token_method:
             raise ConfigError(
                 "Missing KIWOOM_AUTH_TOKEN_PATH/KIWOOM_AUTH_TOKEN_METHOD. "
@@ -109,7 +134,7 @@ class AuthManager:
         headers = {
             'Content-Type': 'application/json;charset=UTF-8',
         }
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response = requests.post(url, headers=headers, json=payload, timeout=timeout or 30)
         
         if not response.ok:
             raise HTTPError(response.status_code, url, response.text[:500])

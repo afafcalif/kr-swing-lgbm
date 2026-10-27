@@ -15,6 +15,7 @@ import inspect
 import multiprocessing as mp
 import os
 import sys
+import threading
 import time
 
 import numpy as np
@@ -196,6 +197,7 @@ class ShardPool:
 
     def __init__(self, codes, n=12, use_append=True, frozen=False, start_timeout=600, call_timeout=180):
         ctx = mp.get_context("spawn")
+        self.lock = threading.RLock()  # 11I: 장 마감 후 계산 스레드와 주 반복이 같이 써도 요청·응답 한 쌍씩 (파이프가 섞이지 않게)
         self.shards = [codes[i::n] for i in range(n)]
         self.conns, self.procs = [], []
         self.call_timeout = call_timeout
@@ -240,6 +242,10 @@ class ShardPool:
             raise PoolError(f"작업 프로세스 {i} 보내기 실패: {e!r}") from e
 
     def compute(self, day, rows, ledger_from):
+        with self.lock:
+            return self._compute(day, rows, ledger_from)
+
+    def _compute(self, day, rows, ledger_from):
         for i, sh in enumerate(self.shards):
             s = set(sh)
             self._send(i, ("compute", (day, {k: v for k, v in rows.items() if k in s}, {k: v for k, v in ledger_from.items() if k in s})))
@@ -256,6 +262,10 @@ class ShardPool:
         return self._ask("amt20", day)
 
     def _ask(self, cmd, day):
+        with self.lock:
+            return self._ask_locked(cmd, day)
+
+    def _ask_locked(self, cmd, day):
         for i in range(len(self.conns)):
             self._send(i, (cmd, pd.Timestamp(day)))
         out = {}
@@ -264,6 +274,36 @@ class ShardPool:
         return out
 
     def close(self):
+        with self.lock:
+            self._close()
+
+    def shutdown(self, wait=2.0):
+        """버리는 묶음 정리 (11I 보완): 파이프를 닫고 terminate -> 짧은 대기(wait 초) -> 아직 살아 있으면 kill.
+        잠금을 잡지 않는다 (그 묶음으로 계산 중이던 쪽은 PoolError 로 끝남). 상주 프로그램은 별도 스레드에서 부른다 (주 반복은 기다리지 않음)"""
+        for c in self.conns:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+        for p in self.procs:
+            try:
+                p.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        end = time.time() + wait
+        for p in self.procs:
+            p.join(max(0.0, end - time.time()))
+        left = [p for p in self.procs if p.is_alive()]
+        for p in left:
+            try:
+                p.kill()
+            except Exception:  # noqa: BLE001
+                pass
+        for p in left:
+            p.join(1.0)
+        return {"killed": len(left), "alive": sum(p.is_alive() for p in self.procs)}
+
+    def _close(self):
         for c in self.conns:
             try:
                 c.send(("stop", None))
@@ -297,12 +337,34 @@ def market_row(index, day, values, frozen=False):
     q = index["kosdaq"][index["kosdaq"].index < day].copy()
     ma = k.rolling(120).mean()
     prev_close, prev_ma = float(k.iat[-1]), float(ma.iat[-1])
+    tail = k.tail(120).to_numpy(np.float64)
+    n_ok = int((np.isfinite(tail) & (tail > 0)).sum()) if len(k) else 0  # 결측·0 이하가 없는 종가 수
     k[day], q[day] = values["kospi"], values["kosdaq"]
     mf = market_frozen(k, q) if frozen else make_market_mem(lambda: (k, q))(None)
     row = mf.loc[day]
+    bad = filter_invalid(prev_close, prev_ma, n_ok)
     filt = {"prev_date": str(k.index[-2].date()), "prev_kospi_close": prev_close, "prev_kospi_ma120": prev_ma,
-            "filter_ok": bool(not (prev_close < prev_ma))}
+            # 11K 보완 2: 입력이 결측·0·비정상이면 통과 아님 (예전 not (NaN < NaN) = True 로 통과되던 경로 막음)
+            "filter_ok": bool(bad is None and prev_close >= prev_ma), "filter_valid": bad is None, "filter_invalid": bad}
     return row, filt
+
+
+def filter_invalid(prev_close, prev_ma, n_ok=120):
+    """시장 필터 입력 확인 (11K 보완 2). 정상이면 None, 아니면 이유. 정상 = 전날 코스피 종가·120일선이 유한한 양수, 최근 120일 종가가 모두 있음,
+    종가 / 120일선 이 0.5 ~ 2.0 (지수 단위 오류·잘못된 행 방지)"""
+    try:
+        c, m = float(prev_close), float(prev_ma)
+    except (TypeError, ValueError):
+        return f"숫자 아님 (종가 {prev_close!r}, 120일선 {prev_ma!r})"
+    if not (np.isfinite(c) and np.isfinite(m)):
+        return f"결측 (종가 {c}, 120일선 {m})"
+    if c <= 0 or m <= 0:
+        return f"0 이하 (종가 {c}, 120일선 {m})"
+    if n_ok < 120:
+        return f"최근 120일 종가 중 결측·0 이하 {120 - n_ok}개"
+    if not (0.5 <= c / m <= 2.0):
+        return f"비정상 비율 종가/120일선 {c / m:.3f}"
+    return None
 
 
 # ---------------------------------------------------------------- 가상 신호 장부

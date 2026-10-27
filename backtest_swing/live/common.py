@@ -36,6 +36,28 @@ CAPITAL = 30_000_000
 SLOTS = 33
 LIMIT_MULT = 1.05
 
+# 11K 1: 대상 종목 목록은 매월 재학습 때 KRX 종목기본정보로 갱신 (8장 2). 포인터 = [{"from": 적용 시작일, "path": csv}] (monthly.py 가 씀).
+# 동결 코드의 stage3_data.UNIVERSE 상수만 그날 적용할 파일로 바꾼다 (파일 형식 같음: code, name, market, ...). 포인터가 없으면 그대로
+UNIVERSE_POINTER = "data/universe_current.json"
+UNIVERSE_DEFAULT = sd.UNIVERSE
+
+
+def universe_for(day, pointer=None):
+    """day 에 쓸 대상 종목 목록 파일 (포인터에서 from <= day 인 마지막 항목, 없으면 기본 data/universe_20261019.csv)"""
+    import json
+    try:
+        with open(pointer or UNIVERSE_POINTER, encoding="utf-8") as f:
+            items = json.load(f).get("items", [])
+    except FileNotFoundError:
+        return UNIVERSE_DEFAULT
+    ok = [i for i in items if str(i["from"]) <= str(pd.Timestamp(day).date()) and os.path.exists(i["path"])]
+    return max(ok, key=lambda i: str(i["from"]))["path"] if ok else UNIVERSE_DEFAULT
+
+
+def apply_universe(day, pointer=None):
+    sd.UNIVERSE = universe_for(day, pointer)
+    return sd.UNIVERSE
+
 
 def git_commit() -> str:
     try:
@@ -313,15 +335,21 @@ class Caller:
         self.env, self.rps = env, rps
         self.n, self.errors, self.hourly, self.fail_streak, self.stopped = 0, [], Counter(), 0, None
 
-    def post(self, tr, path, body, cont="N", key=""):
+    def post(self, tr, path, body, cont="N", key="", deadline=None, timeout=None):
+        """deadline(time.time() 초): 유량 대기·백오프가 그 시각을 넘으면 기다리지 않고 ValueError (손절 감시 한 번의 대기 상한, 11J).
+        429 재시도는 여기 한 겹만 (클라이언트 안 재시도는 끔, 11J). timeout: HTTP 요청 하나의 시간 제한 (손절 감시 5초, 11J 보완 3)"""
         assert tr in self.QUOTE_TRS, f"시세 조회 TR 만 허용: {tr}"
         for backoff in (0, 2, 4, 8, 16, 32):
             if backoff:
+                if deadline is not None and time.time() + backoff > deadline:
+                    raise ValueError(f"시간 상한: {tr} 유량 초과 백오프 {backoff}초가 상한을 넘음")
                 time.sleep(backoff)
             self.n += 1
             self.hourly[pd.Timestamp.now().strftime("%Y-%m-%d %H")] += 1
             try:
-                r = self.c.request(tr_code=tr, method="POST", path=path, json=body, cont_yn=cont, next_key=key)
+                mw = None if deadline is None else max(0.0, deadline - time.time())
+                r = self.c.request(tr_code=tr, method="POST", path=path, json=body, cont_yn=cont, next_key=key, retry_429=False,
+                                   **({"max_wait": mw} if mw is not None else {}), **({"timeout": timeout} if timeout else {}))
             except Exception as e:  # noqa: BLE001
                 msg = str(e)[:200]
                 if "429" not in msg and "1700" not in msg:
@@ -355,3 +383,6 @@ def calendar() -> pd.DatetimeIndex:
         ix = pd.read_parquet(p)
         cal |= set(pd.to_datetime(ix[ix.name == "kospi"].timestamp))
     return pd.DatetimeIndex(sorted(cal))
+
+
+apply_universe(now_kst())  # 11K 1: 이 프로세스가 오늘 쓸 대상 종목 목록 (상주 프로그램은 하루 시작 때마다 다시, run_day rerun 은 그 날짜로)

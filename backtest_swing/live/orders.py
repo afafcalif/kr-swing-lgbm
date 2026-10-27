@@ -4,20 +4,25 @@
 - 매수: 장 마감 동시호가 지정가 trde_tp "0", 가격 = 15:19 가격 x 1.05 를 호가 단위로 올림. 15:21 ~ 15:25 에 보내고 15:28 이후 새 주문 없음.
 - 랜덤엔드: 마감 동시호가는 15:30 이후 최대 30초 안에 체결될 수 있어 15:30 에는 취소하지 않는다. 15:35 에 체결·미체결 조회로
   체결 수량·체결가·체결 시각을 확인하고, 미체결 수량은 "미체결 건너뜀"으로 기록한 뒤 그때 남아 있으면 취소한다.
-- 매도: 손절 = 1분 시세 조회 현재가 <= 손절가면 KRX 시장가(trde_tp "3"). 추세 매도 = 다음 날 08:30 ~ 08:59 시장가.
+- 매도: 손절 = 1분 시세 조회 현재가 < 손절가(백테스트 저가 < 손절가 와 같게 미만)면 "손절 진행 중"으로 고정, 팔릴 때까지 매 분 KRX 시장가(trde_tp "3")
+  (15:20 까지 감지, 15:29 까지 보냄 = 장 마감 동시호가 시장가는 종가 체결, 11J). 추세 매도 = 다음 날 08:30 ~ 08:59 시장가, 못 팔면 09:00 이후 장중 시장가(시가 매도 아님).
   하한가 잠김 등으로 남은 매도는 15:35 확인 후 취소하고 다음 날 시가 재주문 목록에 넣는다.
+- 매도 의무는 종목 코드 단위 (11J 보완 3, positions.sell_duty): 증권사 잔고가 정답. 끝 = 성공한 계좌 조회(모든 쪽)에서 그 종목 보유 0 이 1분 이상 간격으로 두 번 연속일 때만 (R1).
+  보낼 수량 = 같은 분 계좌의 매도 가능 수량(증권사가 걸린 매도 주문을 이미 뺀 값, 0 이면 그 분은 안 보냄). 계좌 조회 실패면 그 종목에
+  오늘 접수·UNKNOWN·SENDING 매도가 없을 때만 보유 파일 수량 (초과분은 증권사 거부). 체결 수량으로 남은 수량을 계산하지 않는다 (OrderManager.duty_sell).
 - 주문 의도 선기록 (2026-10-24, O-01·O-04·R2-01·R2-03·R2-04): 모든 주문은 보내기 직전에 의도(intent_id, 날짜, 단계, 종목, 매수/매도,
   수량, 가격, 시도 번호, 상태 SENDING)를 디스크에 원자적으로 저장하고, 응답을 받으면 바로 상태(ACCEPTED / REJECTED / UNKNOWN / NOT_SENT)와
-  주문번호를 저장한다. 같은 날·같은 단계·같은 종목에 SENDING·UNKNOWN·ACCEPTED 의도가 있으면 다시 보내지 않는다.
+  주문번호를 저장한다. 매수는 같은 날·같은 종목에 SENDING·UNKNOWN·ACCEPTED 의도가 있으면 다시 보내지 않는다 (매도는 위 계좌 수량 규칙).
   재시작 때 SENDING 은 UNKNOWN 으로 바꾸고 미체결(ka10075)·체결(ka10076)·잔고(kt00018)와 종목·수량으로 대조한다.
 - 예외 분류 (O-03·O-18): 요청을 보내기 전 오류(인증·설정 오류)만 NOT_SENT. 서버의 명시적 거부(return_code != 0)만 REJECTED.
   시간 초과·연결 오류·5xx·JSON 파싱 오류·분류 안 된 예외는 UNKNOWN (재주문 안 함). 429 재시도 끝 실패는 REJECTED, 원인 "429".
 - 응답 없음 확인 (O-02): UNKNOWN 은 5초·30초·2분 뒤 다시 조회하고 15:35 정산 때 종목·수량으로도 맞춘다. 조회에 안 보인다고 바로
   NOT_SENT 로 확정하지 않는다. 2분 뒤에도 확정 못 하면 그 종목은 그날 건드리지 않고 알림. 15:35 정산에도 없으면 그때 NOT_SENT.
-- 재주문: 매수·추세 매도는 REJECTED 면 1초 뒤 1회만. 손절은 REJECTED 면 다음 분 감시에서 다시 (하루 최대 5회, 매번 알림, O-11).
+- 재주문: 매수·08:30 추세 매도는 REJECTED 면 1초 뒤 1회만. 손절·늦은 추세 매도는 REJECTED 면 다음 분 감시에서 다시 (상한 없음, 5회 뒤 간격 늘림, 11J).
 - 실행 점검 모드(3B): 필터 미통과일은 전체 장부 상위 3 을 "점검용", 통과일은 전략 장부 상위 3 을 "본래".
 - 주문 TR 은 Broker(allow_orders=True) 일 때만 보낸다 (기본 False).
 """
+import contextlib
 import json
 import os
 import threading
@@ -38,7 +43,9 @@ FILL_TIME_KEYS = ("cntr_tm", "tm", "ord_tm", "cnfm_tm")  # 체결 시각 필드 
 SENDING, ACCEPTED, REJECTED, UNKNOWN, NOT_SENT = "SENDING", "ACCEPTED", "REJECTED", "UNKNOWN", "NOT_SENT"
 BLOCKING = {SENDING, UNKNOWN, ACCEPTED}
 CHECK_DELAYS = (5, 30, 120)  # 응답 없음 다시 조회 (초)
-MAX_ATTEMPTS = {"buy": 2, "trend_sell": 2, "stop": 5}
+MAX_ATTEMPTS = {"buy": 2, "trend_sell": 2, "stop": None, "trend_late": None}  # None = 상한 없음 (거부가 계속되면 간격만 늘림, 11J)
+RETRY_FREE = 5        # 상한 없는 단계: 거부 5회까지는 매 분, 그 뒤 2·4·8분 ... 최대 10분 간격 (장 끝까지)
+RETRY_MAX_GAP = 10
 
 
 class NoResponse(Exception):
@@ -62,8 +69,18 @@ def code_of(x):
     return s[1:] if s[:1] == "A" and len(s) == 7 else s.replace("_AL", "").replace("_NX", "")
 
 
+AUTH_WORDS = ("토큰", "token", "인증")  # 11J 보완 3 N2: 인증 실패·토큰 만료 거부 메시지
+
+
+def auth_msg(m):
+    m = str(m or "").lower()
+    return any(w in m for w in AUTH_WORDS)
+
+
 def classify(call):
-    """주문 TR 호출 결과 분류 -> dict(outcome, return_code, msg, ord_no, cause)"""
+    """주문 TR 호출 결과 분류 -> dict(outcome, return_code, msg, ord_no, cause).
+    11J 보완 3 N2: 인증 실패·토큰 만료(토큰 발급 실패로 안 보냄, HTTP 401, 인증·토큰 거부 메시지)는 서버가 주문을 처리하지 않은 것 ->
+    NOT_SENT(not_sent_kind auth, 다시 보내도 됨, 거부 횟수에 안 셈)"""
     try:
         from kiwoom.errors import AuthError, ConfigError, HTTPError, NotSent
     except Exception:  # noqa: BLE001
@@ -75,15 +92,22 @@ def classify(call):
     except NotSent as e:  # 2차 확인 리뷰 4: 유량 대기 상한 초과·전송 직전 마감 시각 확인 실패 = 보내지 않음
         return {"outcome": NOT_SENT, "cause": str(e)[:200], "not_sent_kind": "rate" if "유량" in str(e) else "deadline"}
     except Exception as e:  # noqa: BLE001
-        if AuthError and isinstance(e, (AuthError, ConfigError)):
+        if AuthError and isinstance(e, AuthError):
+            return {"outcome": NOT_SENT, "cause": f"인증·토큰 (보내기 전): {e!r}"[:200], "not_sent_kind": "auth"}
+        if AuthError and isinstance(e, ConfigError):
             return {"outcome": NOT_SENT, "cause": f"보내기 전 오류: {e!r}"[:200]}
         status = getattr(e, "status_code", None)
+        if HTTPError and isinstance(e, HTTPError) and status == 401:
+            return {"outcome": NOT_SENT, "cause": f"HTTP 401 인증 거부: {getattr(e, 'response_text', '')}"[:200], "not_sent_kind": "auth"}
         if HTTPError and isinstance(e, HTTPError) and isinstance(status, int) and 400 <= status < 500:
             try:
                 j = json.loads(getattr(e, "response_text", "") or "{}")
             except Exception:  # noqa: BLE001
                 j = {}
             rc = j.get("return_code")
+            if rc not in (None, 0, "0") and auth_msg(j.get("return_msg")):
+                return {"outcome": NOT_SENT, "return_code": rc, "msg": str(j.get("return_msg", ""))[:200], "cause": f"HTTP {status} 인증·토큰 거부",
+                        "not_sent_kind": "auth"}
             if rc not in (None, 0, "0"):
                 return {"outcome": REJECTED, "return_code": rc, "msg": str(j.get("return_msg", ""))[:200], "cause": f"HTTP {status}"}
         return {"outcome": UNKNOWN, "cause": f"{type(e).__name__}: {e}"[:200]}
@@ -100,6 +124,8 @@ def classify(call):
         return {"outcome": ACCEPTED, "return_code": 0, "msg": str(j.get("return_msg", ""))[:200], "ord_no": str(j.get("ord_no") or "") or None}
     if rc is None:
         return {"outcome": UNKNOWN, "cause": f"return_code 없음: {str(j)[:150]}"}
+    if auth_msg(j.get("return_msg")):
+        return {"outcome": NOT_SENT, "return_code": rc, "msg": str(j.get("return_msg", ""))[:200], "cause": "인증·토큰 거부", "not_sent_kind": "auth"}
     return {"outcome": REJECTED, "return_code": rc, "msg": str(j.get("return_msg", ""))[:200], "cause": "return_code"}
 
 
@@ -146,15 +172,32 @@ class Broker:
     def __init__(self, client, allow_orders=False):
         self.client, self.allow_orders = client, allow_orders
         self.guard = None  # 주문 전송 직전 확인 함수 (OrderManager 가 매 전송마다 시간창 확인으로 넣는다)
+        self._tl = threading.local()
 
-    def _read(self, tr, path, body):
-        """조회 TR: 목록이 있으면 cont-yn/next-key 로 모든 페이지를 모은다 (Codex 3). 중간 페이지 실패는 전체 실패"""
+    @contextlib.contextmanager
+    def http_timeout(self, sec):
+        """이 스레드의 HTTP 요청 하나의 시간 제한을 sec 초로 (손절 감시 안 계좌 조회·매도 전송 5초, 11J 보완 3)"""
+        old = getattr(self._tl, "timeout", None)
+        self._tl.timeout = sec
+        try:
+            yield
+        finally:
+            self._tl.timeout = old
+
+    def _tkw(self):
+        t = getattr(getattr(self, "_tl", None), "timeout", None)
+        return {"timeout": t} if t else {}
+
+    def _read(self, tr, path, body, quick=False):
+        """조회 TR: 목록이 있으면 cont-yn/next-key 로 모든 페이지를 모은다 (Codex 3). 중간 페이지 실패는 전체 실패.
+        quick: 클라이언트 안 429 재시도(2·4·8초 대기)를 끄고 429 면 바로 실패 (손절 감시 한 번의 대기 상한, 11J)"""
         assert tr in READ_TRS, tr
         lk = READ_SPEC[tr][0]
         cont, key, first, items = "N", "", None, []
         for page in range(MAX_PAGES):
+            kw = {"retry_429": False, **self._tkw()} if quick else self._tkw()
             try:
-                r = self.client.request(tr_code=tr, method="POST", path=path, json=body, cont_yn=cont, next_key=key)
+                r = self.client.request(tr_code=tr, method="POST", path=path, json=body, cont_yn=cont, next_key=key, **kw)
             except TypeError:  # cont_yn 인자를 모르는 클라이언트
                 r = self.client.request(tr_code=tr, method="POST", path=path, json=body)
             except Exception as e:  # noqa: BLE001
@@ -172,7 +215,10 @@ class Broker:
                 return first
             items += j[lk]
             h = getattr(r, "headers", {}) or {}
-            if str(h.get("cont-yn", "N")).upper() != "Y" or not h.get("next-key"):
+            more = str(h.get("cont-yn", "N")).upper() == "Y"
+            if more and not h.get("next-key"):  # 11J 보완 3 R1: 다음 쪽이 있다는데 키가 없음 = 모든 쪽을 못 받음 -> 실패
+                raise QueryError(f"{tr} {page + 1}페이지: cont-yn Y 인데 next-key 없음 (다음 쪽을 받을 수 없음)")
+            if not more:
                 first[lk] = items
                 first["_pages"] = page + 1
                 return first
@@ -188,8 +234,14 @@ class Broker:
             # 확인 리뷰 26: 주문 TR 은 클라이언트 안 429 재시도(2·4·8초 대기)를 끈다. 429 = 받아들여지지 않음(REJECTED -429) ->
             # OrderManager 가 매 전송 직전 시간창을 확인하며 다시 보낸다
             return self.client.request(tr_code=tr, method="POST", path=ORDR, json=body, retry_429=False,
-                                       max_wait=self.ORDER_MAX_WAIT, before_send=self.guard)
-        return classify(call)
+                                       max_wait=self.ORDER_MAX_WAIT, before_send=self.guard, **self._tkw())
+        res = classify(call)
+        if res.get("not_sent_kind") == "auth":  # N2: 토큰을 버려 다음 시도 때 다시 발급
+            try:
+                getattr(getattr(self.client, "auth", None), "invalidate", lambda: None)()
+            except Exception:  # noqa: BLE001
+                pass
+        return res
 
     def buy_limit(self, code, qty, price):
         return self._order("kt10000", {"dmst_stex_tp": "KRX", "stk_cd": code, "ord_qty": str(int(qty)), "ord_uv": str(int(price)),
@@ -209,8 +261,8 @@ class Broker:
     def fills(self):
         return self._read("ka10076", ACNT, {"stk_cd": "", "qry_tp": "0", "sell_tp": "0", "ord_no": "", "stex_tp": "0"})["cntr"]
 
-    def balance(self):
-        return self._read("kt00018", ACNT, {"qry_tp": "1", "dmst_stex_tp": "KRX"})
+    def balance(self, quick=False):
+        return self._read("kt00018", ACNT, {"qry_tp": "1", "dmst_stex_tp": "KRX"}, quick=quick)
 
     def deposit(self):
         return self._read("kt00001", ACNT, {"qry_tp": "3"})
@@ -222,9 +274,16 @@ class Broker:
         return {"holdings": holdings(bal), "orderable": num(dep["ord_alow_amt"]), "d2": num(dep["d2_entra"]), "entr": num(dep["entr"])}
 
 
-def p4_plan(top, price_col, equity, cash, held, kind):
+def buy_label(kind):
+    """주문 이름표 (11I): 필터 통과일 "매수 (P4)", 필터 미통과일(전체 장부 상위 3) "매수 (점검용)" """
+    return "매수 (P4)" if kind == "본래" else f"매수 ({kind})"
+
+
+def p4_plan(top, price_col, equity, cash, held, kind, upper=None):
     """P4 (EXEC_SPEC 2-3): 종목당 = 총자산(예수금 + 보유 x 15:19 가격)/33, 수량 = 내림(금액 / (가격 x 1.001 x 1.00015)) 원주가,
-    지정가 = 가격 x 1.05 호가 올림. 건너뜀: 실제 보유 중 / 현금(주문 가능 금액 - 앞 매수 주문 금액) < 종목당 금액 / 수량 0. 대체 안 함"""
+    지정가 = min(가격 x 1.05 호가 올림, 그날 상한가) (11J, upper = {code: 상한가}, resident.upper_limits: 스냅샷 upl_pric, 없거나 비정상이면
+    기준가(전일 종가) x 1.30 호가 내림. upper 에 있는데 값이 None 이면 그 종목은 매수 안 함 (데이터 이상)).
+    건너뜀: 실제 보유 중 / 현금(주문 가능 금액 - 앞 매수 주문 금액) < 종목당 금액 / 수량 0. 대체 안 함"""
     from common import CAPITAL, LIMIT_MULT, SLOTS, ceil_tick, sb  # noqa: F401
     amt = equity / SLOTS
     plan = []
@@ -232,9 +291,16 @@ def p4_plan(top, price_col, equity, cash, held, kind):
         p = float(getattr(r, price_col))
         qty = int(np.floor(amt / (p * (1 + sb.SLIPPAGE) * (1 + sb.COMMISSION))))
         limit = ceil_tick(p * LIMIT_MULT)
-        why = "보유 중" if r.code in held else ("현금 부족" if cash < amt else ("수량 0" if qty == 0 else ""))
+        up = (upper or {}).get(r.code)
+        capped = bool(up and up > 0 and limit > up)
+        if capped:
+            limit = int(up)  # 상한가는 호가 단위에 맞는 값
+        no_upper = upper is not None and r.code in upper and up is None  # 11J 보완 7: 상한가·전일 종가 모두 없음 = 데이터 이상, 매수 안 함
+        why = "보유 중" if r.code in held else ("데이터 이상: 상한가·전일 종가 없음" if no_upper else
+                                              ("현금 부족" if cash < amt else ("수량 0" if qty == 0 else "")))
         plan.append({"code": r.code, "score": float(r.score), "price_1519": p, "amount_target": round(amt), "qty": 0 if why else qty,
-                     "limit_price": limit, "order_value": 0 if why else limit * qty, "skip": why, "kind": kind})
+                     "limit_price": limit, "order_value": 0 if why else limit * qty, "skip": why, "kind": kind,
+                     **({"limit_capped_at_upper": True, "limit_1p05": ceil_tick(p * LIMIT_MULT)} if capped else {})})
         if not why:
             cash -= limit * qty
     return plan
@@ -268,48 +334,127 @@ class AccountWatch:
         return {"fail_count": self.fail_count, "longest_streak_min": round(self.longest_min, 1), "log": self.log[-50:]}
 
 
-def stop_cycle(om, watch, positions, quote_fn, balance_fn, now, mismatch_seen=None):
-    """1분 손절 감시 한 번 (2026-10-23 결정): 보유 종목·손절가 = positions(상태 파일), 현재가 = 시세 조회(quote_fn: codes -> {code: 가격}).
-    계좌 조회(balance_fn -> kt00018 응답)는 보유 수량·현금 대조용, 실패해도 손절 판단은 한다. 상태 파일 보유와 계좌 보유가 다르면 기록·알림 (같은 차이는 하루 한 번).
-    반환: dict (주문 기록, 대조 결과)"""
+def new_duty(kind, since, reason, **kw):
+    """매도 의무 표시 (종목 코드 단위, 11J 보완 3): kind = stop(손절 진행 중) / trend(추세 매도), since = 발생일, at = 발생 시각, reason = 사유"""
+    since = str(since or "")
+    return {"kind": kind, "since": since[:10] or None, "at": since[11:19] or None, "reason": reason, **kw}
+
+
+ZERO_CONFIRM_SEC = 60  # 11J 보완 3 R1: 보유 0 을 이 간격(초) 이상 두고 두 번 연속 확인해야 의무 끝
+
+
+def end_duties(positions, acct, now):
+    """11J 보완 3 R1: 성공한 계좌 조회(acct = holdings, 모든 쪽을 받은 응답)에서 보유 0 이 ZERO_CONFIRM_SEC 이상 간격으로 두 번 연속일 때만
+    매도 의무를 끝낸다 (다음 날 시가 매도 목록에서도 뺌). 첫 0 은 의무에 zero_at 으로 기록만, 그 사이 보유가 보이면 지움 (응답에서 한 번 빠진 종목).
+    반환: (끝난 종목, 이번에 처음 0 을 본 종목)"""
+    duty = positions.setdefault("sell_duty", {})
+    now = pd.Timestamp(now)
+    ended, first = [], []
+    for c, du in list(duty.items()):
+        if int((acct.get(c) or {}).get("qty", 0)) > 0:
+            du.pop("zero_at", None)
+            continue
+        z = du.get("zero_at")
+        if z is None or now < pd.Timestamp(z):
+            du["zero_at"] = f"{now:%Y-%m-%d %H:%M:%S}"
+            first.append(c)
+        elif now - pd.Timestamp(z) >= pd.Timedelta(seconds=ZERO_CONFIRM_SEC):
+            duty.pop(c)
+            positions.get("next_open_sells", {}).pop(c, None)
+            ended.append(c)
+    return ended, first
+
+
+def qty_changes(held, acct, records, date):
+    """11K 7: 체결 없이 보유 수량이 바뀐 종목 = 상태 파일 수량과 성공한 계좌 조회 수량이 다르고(둘 다 > 0) 오늘 그 종목 매수·매도 의도가
+    하나도 없음(NOT_SENT 만 있으면 없는 것으로). 액면분할·병합·무상증자 추정. 반환 {code: {file, account}}"""
+    out = {}
+    for c, p in held.items():
+        fq, aq = int(p.get("qty", 0)), int((acct.get(c) or {}).get("qty", 0))
+        if fq <= 0 or aq <= 0 or fq == aq:
+            continue
+        mine = [r for r in records if r.get("date") == date and r.get("code") == c and r.get("side") in ("buy", "sell") and r.get("status") != NOT_SENT]
+        if not mine:
+            out[c] = {"file": fq, "account": aq}
+    return out
+
+
+def duty_inputs(positions, codes, acct):
+    """OrderManager.duty_sell 에 줄 값: {code: {file_qty: 보유 파일 수량, acct: 같은 분 계좌 {qty, sellable} (조회 실패면 None)}}"""
+    held = positions.get("held", {})
+    return {c: {"file_qty": int((held.get(c) or {}).get("qty", 0)),
+                "acct": None if acct is None else (acct.get(c) or {"qty": 0, "sellable": 0})} for c in codes}
+
+
+def stop_cycle(om, watch, positions, quote_fn, balance_fn, now, mismatch_seen=None, detect=True, budget=None, on_trigger=None,
+               wall=time.time):
+    """1분 손절 감시 한 번 (2026-10-23 결정, 11J, 11J 보완 3). 보유 종목·손절가 = positions(상태 파일), 현재가 = quote_fn(codes[, deadline]).
+    매도 의무 = positions["sell_duty"] (종목 코드 단위: 손절 진행 중·추세 매도). 증권사 잔고가 정답 (OrderManager.duty_sell).
+    ① 계좌 조회 (balance_fn). 성공하면 보유 0 을 기록, 1분 이상 간격 두 번 연속 0 이면 의무를 끝냄 (end_duties)
+    ② 의무 종목마다 같은 분 계좌 매도 가능 수량으로 시장가 (0 이면 걸린 주문 대기). 계좌 조회 실패면 걸린 매도가 없을 때만 보유 파일 수량
+    ③ 새 손절 감지 (시세 조회, 감지 창은 이 감시가 시작된 시각 now, 의무가 있는 종목은 뺌). 새 의무는 on_trigger 로 먼저 저장(선기록)한 뒤 보냄
+    체결 조회는 하지 않는다. budget(초): 시세 조회의 대기 상한 (wall() 기준, 감시 시작부터). 반환: dict"""
     held_pos = {c: p for c, p in positions.get("held", {}).items() if p.get("qty", 0) > 0}
-    acct, acct_err = None, None
+    duty = positions.setdefault("sell_duty", {})
+    kind_of = lambda c: (positions.get("held", {}).get(c) or {}).get("kind", "본래")  # noqa: E731
+    at = pd.Timestamp(now).strftime("%H:%M:%S")
+    wall_end = wall() + budget if budget else None
+    # ① 계좌 조회
+    acct, acct_err, ended, zero = None, None, [], []
     try:
-        acct = holdings(balance_fn())
+        acct = holdings(check_fields_bal(balance_fn()))  # 모든 쪽을 받고 필드가 맞는 응답만 성공 (R1)
         watch.ok(now)
-    except Exception as e:  # noqa: BLE001  (응답 없음·HTTP 오류 모두)
+        ended, zero = end_duties(positions, acct, now)
+    except Exception as e:  # noqa: BLE001  (응답 없음·HTTP 오류·쪽 일부 실패 모두)
         acct_err = e
         watch.fail(now, e)
-    prices = quote_fn(sorted(held_pos)) if held_pos else {}
-    held, not_in_acct = {}, []
-    for c, p in held_pos.items():
-        if c not in prices or not prices[c] > 0:
-            continue
-        if acct is not None:
-            # 2026-10-24 F-01: 계좌 조회가 됐는데 계좌에 없으면 매도 대상에서 뺀다 (상태 파일 수량은 계좌 조회 실패 때만)
-            if c not in acct or acct[c]["qty"] <= 0:
-                not_in_acct.append(c)
-                continue
-            sellable = acct[c]["sellable"]
-        else:
-            sellable = int(p["qty"])
-        held[c] = {"qty": int(p["qty"]), "sellable": sellable, "cur_price": float(prices[c]), "avg_price": p.get("avg_price"),
-                   **({"acct_qty": int(acct[c]["qty"])} if acct is not None else {})}
-    stops = {c: p["stop_price"] for c, p in held_pos.items() if p.get("stop_price")}
-    recs = om.stop_check(held, stops, kind_of=lambda c: held_pos.get(c, {}).get("kind", "본래"))
+    # 11K 보완 3: 체결로 설명 안 되는 수량 변화(이번 분 새로 본 것 = changed, 호출한 쪽이 수동 확인 표시)와 수동 확인 중인 종목(paused)은
+    # 자동 손절·추세 매도와 새 손절 감지를 멈춘다 (자동 조정 없음, 사람이 확인할 때까지)
+    from positions import in_review
+    changed = qty_changes(held_pos, acct, om.records, om.date()) if acct is not None else {}
+    paused = sorted(c for c, p in held_pos.items() if in_review(p))
+    stopped = set(changed) | set(paused)
+    # ② 의무 매도
+    go = {c: x for c, x in duty.items() if c not in stopped}
+    orders = om.send_duties(go, duty_inputs(positions, go, acct), kind_of)
+    # ③ 새 손절 감지 (2026-10-24 F-01: 계좌 조회가 됐는데 계좌에 없으면 매도 대상에서 뺀다)
+    not_in_acct = [c for c in held_pos if acct is not None and (c not in acct or acct[c]["qty"] <= 0)]
+    prices, quote_err, new = {}, None, {}
+    if held_pos and detect:
+        try:
+            codes = sorted(held_pos)
+            prices = quote_fn(codes, deadline=wall_end) if wall_end else quote_fn(codes)
+        except Exception as e:  # noqa: BLE001  (시세 조회 실패·시간 상한)
+            quote_err = e
+        cand = {c: {"cur_price": float(prices[c])} for c in held_pos
+                if c not in duty and c not in not_in_acct and c not in stopped and c in prices and prices[c] > 0}
+        stops = {c: p["stop_price"] for c, p in held_pos.items() if p.get("stop_price")}
+        new = om.detect_stops(cand, stops, at=at)
+        if new:
+            for c, rec in new.items():
+                duty[c] = new_duty("stop", rec["since"], f"현재가 {rec['price']:.0f} < 손절가 {rec['stop']:.0f}", price=rec["price"], stop=rec["stop"],
+                                   **({"stop_temp": True} if held_pos[c].get("stop_temp") else {}))  # N1: 임시 손절가로 만든 의무
+            if on_trigger is not None:
+                on_trigger(new)  # 손절 진행 중 표시를 주문 전송 전에 먼저 저장
+            for c, rec in new.items():
+                om.notify(f"[손절 진행 중] {c} 현재가 {rec['price']:.0f} < 손절가 {rec['stop']:.0f} — 팔릴 때까지 매 분 시장가 (가격이 반등해도)")
+            orders += om.send_duties({c: duty[c] for c in new}, duty_inputs(positions, new, acct), kind_of)
     diff = None
     if acct is not None:
         a = {c: h["qty"] for c, h in acct.items() if h["qty"] > 0}
         s = {c: int(p["qty"]) for c, p in held_pos.items()}
-        diff = unexplained_diff(s, a, om.records, om.date())
+        # 수량 변화·수동 확인 종목은 그 종목만 멈춤 (전체 매수 차단인 보유 불일치에 넣지 않음)
+        diff = {c: v for c, v in unexplained_diff(s, a, om.records, om.date()).items() if c not in stopped}
         not_in_acct = [c for c in not_in_acct if c in diff]  # Codex 14: 당일 매도로 설명되면 불일치 아님 (매도 대상에서는 그대로 뺀다)
         if diff and mismatch_seen is not None:
             key = json_key(diff)
             if key not in mismatch_seen:
                 mismatch_seen.add(key)
                 om.notify(f"[보유 불일치] 상태 파일 vs 계좌: {diff}")
-    return {"orders": recs, "quotes": prices, "account_ok": acct is not None, "account_error": str(acct_err)[:150] if acct_err else None,
-            "mismatch": diff, "not_in_account": not_in_acct}
+    return {"orders": orders, "quotes": prices, "account_ok": acct is not None, "account_error": str(acct_err)[:150] if acct_err else None,
+            "mismatch": diff, "not_in_account": not_in_acct, "triggered_new": new, "duties": sorted(duty), "duty_ended": ended,
+            "duty_zero": zero, "acct": acct, "qty_changed": changed, "review_paused": paused,
+            "quote_error": str(quote_err)[:150] if quote_err else None}
 
 
 def unexplained_diff(state, acct, records, date):
@@ -477,7 +622,9 @@ class OrderManager:
         self.t = {"buy_from": t.get("buy_from", "15:21:00"), "buy_until": t.get("buy_until", "15:25:00"),
                   "no_new_order_after": t.get("no_new_order_after", "15:28:00"), "close_check": t.get("close_check", "15:35:00"),
                   "trend_sell_from": t.get("trend_sell_from", "08:30:00"), "trend_sell_until": t.get("trend_sell_until", "08:59:00"),
-                  "stop_from": t.get("stop_from", "09:00:00"), "stop_until": t.get("stop_until", "15:20:00")}
+                  "stop_from": t.get("stop_from", "09:00:00"), "stop_until": t.get("stop_until", "15:20:00"),
+                  # 11J: 손절 진행 중 매도는 장 마감 동시호가(15:20 ~ 15:30) 안 15:29 까지 보냄 (시장가 = 종가 체결)
+                  "stop_send_until": t.get("stop_send_until", "15:29:00")}
         self.store = store if store is not None else _MemStore(clock)
         self.next_open_sells = []
         self.alerted_unresolved = set()
@@ -502,25 +649,31 @@ class OrderManager:
         h = self.hms()
         return window[0] <= h and (h <= window[1] if window[2] else h < window[1])
 
-    def _send(self, stage, side, code, qty, price, trde_tp, kind, reason, assumed_kind, fn, retry_now, extra=None, window=None):
+    def _send(self, stage, side, code, qty, price, trde_tp, kind, reason, assumed_kind, fn, retry_now, extra=None, window=None, blocking=True):
         """주문 의도 선기록 -> 보내기 -> 결과 기록. retry_now: REJECTED 면 1초 뒤 바로 1회 더 (매수·추세 매도).
         window: 매 전송(재시도 포함) 직전에 시간창 확인, 넘으면 보내지 않음 (Codex 26).
         전송 뒤 어떤 예외가 나도 의도를 UNKNOWN 으로 저장 (Codex 9)."""
         d = self.date()
         if getattr(self.store, "corrupt", None):
+            # 11K 6: 의도 파일 손상이면 매수만 막고, 매도 의무(손절·추세 매도)와 그 취소는 계속. 손상 전 의도를 모르므로 매도 수량은
+            # 같은 분 계좌 매도 가능 수량으로만 (증권사가 걸린 매도를 이미 뺀 값, duty_sell 의 qty_basis) — 보유 파일 수량으로는 안 보냄
+            sell_ok = side == "sell" and stage in ("stop", "trend_sell", "trend_late") and (extra or {}).get("qty_basis") == "계좌 매도 가능 수량"
             if not self.corrupt_alerted:
                 self.corrupt_alerted = True
-                self.notify(f"[주문 차단] {self.store.corrupt} — 오늘 모든 주문을 막음")
-            return {"skipped": f"의도 파일 손상 — 오늘 모든 주문 막음 ({self.store.corrupt})", "code": code}
-        blk = self.store.blocking(d, code, side=side)
-        if blk is not None:
-            return {"skipped": f"같은 날 {side} 주문 의도 {blk['intent_id']} 가 {blk['status']} — 다시 보내지 않음", "code": code}
+                self.notify(f"[주문 차단] {self.store.corrupt} — 오늘 매수 막음, 매도 의무(손절·추세 매도)는 계좌 매도 가능 수량 안에서 계속")
+            if not (sell_ok or stage == "cancel"):
+                why = "매수 막음" if side == "buy" else "매도는 계좌 매도 가능 수량을 알 때만 (계좌 조회 실패)"
+                return {"skipped": f"의도 파일 손상 — {why} ({self.store.corrupt})", "code": code}
+        if blocking:  # 매도 의무는 막지 않음 (계좌 매도 가능 수량 규칙 duty_sell 로 이미 확인, 11J 보완 3)
+            blk = self.store.blocking(d, code, side=side)
+            if blk is not None:
+                return {"skipped": f"같은 날 {side} 주문 의도 {blk['intent_id']} 가 {blk['status']} — 다시 보내지 않음", "code": code}
         rate_waits = 0
         while True:
             if not self.in_window(window):
                 return {"skipped": f"시간창 밖 ({self.hms()}, {window[0]} ~ {window[1]}) — 보내지 않음", "code": code}
             n = self.store.rejected_count(d, code, stage)
-            if n >= MAX_ATTEMPTS[stage]:
+            if MAX_ATTEMPTS[stage] is not None and n >= MAX_ATTEMPTS[stage]:
                 return {"skipped": f"{stage} 시도 {n}회 (최대 {MAX_ATTEMPTS[stage]}) — 더 보내지 않음", "code": code}
             it = self.store.add(date=d, stage=stage, side=side, code=code, qty=int(qty), price=price, trde_tp=trde_tp, attempt=n + 1,
                                 kind=kind, reason=reason, assumed_kind=assumed_kind, **(extra or {}))
@@ -546,7 +699,7 @@ class OrderManager:
                                   checks_due=[str(t + pd.Timedelta(seconds=x)) for x in CHECK_DELAYS])
                 self.notify(f"[주문 응답 없음] {side} {code} {qty}주 (전송 뒤 처리 오류 {e!r}) — 조회로 확정 전 재주문 안 함"[:300])
                 return it
-            if done or not retry_now or n + 1 >= MAX_ATTEMPTS[stage]:
+            if done or not retry_now or (MAX_ATTEMPTS[stage] is not None and n + 1 >= MAX_ATTEMPTS[stage]):
                 return it
             self.sleep(1.0)
 
@@ -568,9 +721,11 @@ class OrderManager:
         if out == NOT_SENT:
             self.store.update(it, status=NOT_SENT, cause=res.get("cause"),
                               **({"resendable": True, "not_sent_kind": res["not_sent_kind"]} if res.get("not_sent_kind") else {}))
+            if res.get("not_sent_kind") == "auth":
+                self.notify(f"[주문 보내지 않음] 인증·토큰 {stage} {side} {code} {qty}주: {res.get('cause')} — 거부 횟수에 안 셈, 다음 차례에 다시"[:300])
             return True
         self.store.update(it, status=REJECTED, return_code=res.get("return_code"), return_msg=res.get("msg"), cause=res.get("cause"))
-        self.notify(f"[주문 거부] {stage} {side} {code} {qty}주 (시도 {n + 1}/{MAX_ATTEMPTS[stage]}): {res.get('msg')} ({res.get('cause')})")
+        self.notify(f"[주문 거부] {stage} {side} {code} {qty}주 (시도 {n + 1}/{MAX_ATTEMPTS[stage] or '상한 없음'}): {res.get('msg')} ({res.get('cause')})")
         return False
 
     # ---------------------------------------------------------- 응답 없음 확인
@@ -684,7 +839,7 @@ class OrderManager:
             if left is not None and need > left:
                 if not self.store.of(self.date(), p["code"], stage="buy"):
                     it = self.store.add(date=self.date(), stage="buy", side="buy", code=p["code"], qty=int(p["qty"]), price=p["limit_price"],
-                                        trde_tp="0", attempt=0, kind=kind, reason="매수 (P4)", assumed_kind="buy")
+                                        trde_tp="0", attempt=0, kind=kind, reason=buy_label(kind), assumed_kind="buy")
                     self.store.update(it, status=NOT_SENT, cause=f"증거금 부족(백테스트는 매수): 필요 {need:,.0f} > 남은 주문가능금액 {left:,.0f}")
                 out.append({"skipped": "증거금 부족(백테스트는 매수)", "code": p["code"], "need": need, "left": left})
                 continue
@@ -692,7 +847,7 @@ class OrderManager:
             if not (self.t["buy_from"] <= now <= self.t["buy_until"]) or now >= self.t["no_new_order_after"]:
                 out.append({"skipped": f"보내지 않음 (시각 {now}, 보내는 시각 {self.t['buy_from']} ~ {self.t['buy_until']})", "code": p["code"]})
                 continue
-            r = self._send("buy", "buy", p["code"], p["qty"], p["limit_price"], "0", kind, "매수 (P4)", "buy",
+            r = self._send("buy", "buy", p["code"], p["qty"], p["limit_price"], "0", kind, buy_label(kind), "buy",
                            lambda p=p: self.b.buy_limit(p["code"], p["qty"], p["limit_price"]), retry_now=True,
                            window=(self.t["buy_from"], self.t["no_new_order_after"], False),
                            extra={"pre_qty": int((pre_qty or {}).get(p["code"], 0))} if pre_qty is not None else None)
@@ -703,39 +858,107 @@ class OrderManager:
 
     # ---------------------------------------------------------- 매도
 
-    def stop_check(self, held, stops, kind_of=lambda c: "본래"):
-        """1분마다: held = {code: qty, sellable, cur_price}, stops = {code: 손절가(원주가)}. 현재가 <= 손절가면 시장가 매도.
-        REJECTED 면 다음 분에 다시 (하루 최대 5회), UNKNOWN·ACCEPTED 면 다시 보내지 않음 (같은 날 다른 매도 의도도 포함)"""
-        now = self.hms()
-        if not (self.t["stop_from"] <= now <= self.t["stop_until"]):
-            return []
-        out = []
+    def retry_wait(self, stage, code):
+        """상한 없는 단계(손절·늦은 추세 매도)의 거부 뒤 간격 (11J): 거부 5회까지는 매 분, 그 뒤 2·4·8분 ... 최대 10분. 반환: 기다릴 이유, 아니면 None"""
+        rej = [i for i in self.store.of(self.date(), code, stage) if i["status"] == REJECTED]
+        n = len(rej)
+        if n < RETRY_FREE:
+            return None
+        gap = min(2 ** (n - RETRY_FREE + 1), RETRY_MAX_GAP)
+        last = pd.Timestamp(f"{self.date()} {str(rej[-1].get('created', '00:00:00'))[:8]}")
+        if self.clock() < last + pd.Timedelta(minutes=gap):
+            return f"거부 {n}회 -> {gap}분 간격 (다음 {last + pd.Timedelta(minutes=gap):%H:%M})"
+        return None
+
+    def duty_sell(self, stage, c, h, kind, reason, assumed_kind, window, retry_now, extra=None):
+        """매도 의무 한 번 (손절·추세 매도·늦은 추세 매도 같은 경로, 11J 보완 3). h = {file_qty: 보유 파일 수량, acct: 같은 분 계좌 {qty, sellable} 또는 None}
+        (도구·시험의 {qty, sellable} 은 계좌 보유로 봄). 계좌 조회 됨: 매도 가능 수량 (증권사가 걸린 매도를 이미 뺀 값, 0 이면 그 분은 안 보냄).
+        계좌 조회 실패: 오늘 이 종목에 접수·UNKNOWN·SENDING 매도가 하나도 없을 때만 보유 파일 수량 (초과분은 증권사 거부로 끝남)"""
+        if "acct" not in h and "file_qty" not in h:
+            h = {"file_qty": int(h.get("qty", 0)), "acct": None if h.get("no_acct") else h}
+        a = h.get("acct")
+        if a is not None:
+            q = int(a.get("sellable") or 0) if int(a.get("qty") or 0) > 0 else 0
+            if q <= 0:
+                return {"skipped": f"계좌 매도 가능 0 (보유 {int(a.get('qty') or 0)}주) — 걸린 매도 주문 대기", "code": c}
+            basis, before = "계좌 매도 가능 수량", int(a["qty"])
+        else:
+            blk = self.store.blocking(self.date(), c, side="sell")
+            if blk is not None:
+                return {"skipped": f"계좌 조회 실패, 오늘 걸린 매도 {blk['intent_id']} ({blk['status']}) — 보내지 않음", "code": c}
+            q = before = int(h.get("file_qty") or 0)
+            if q <= 0:
+                return {"skipped": "계좌 조회 실패, 보유 파일 수량 0 — 보내지 않음", "code": c}
+            basis = "보유 파일 수량 (계좌 조회 실패)"
+        if MAX_ATTEMPTS[stage] is None:
+            wait = self.retry_wait(stage, c)
+            if wait:
+                return {"skipped": wait, "code": c}
+        ext = {"held_qty_before": before, "pre_qty": before, "qty_basis": basis, **(extra or {})}
+        return self._send(stage, "sell", c, q, None, "3", kind, reason + ")", assumed_kind, lambda: self.b.sell_market(c, q),
+                          retry_now=retry_now, window=window, extra=ext, blocking=False)
+
+    def detect_stops(self, held, stops, at=None):
+        """새 손절 감지: 현재가 < 손절가 (백테스트 저가 < 손절가 와 같게 미만). 감지 창(stop_from ~ stop_until 의 분, 15:20 포함)은
+        at = 이 감시가 시작된 시각으로 판단 (조회가 늦어 지금 시각이 15:21 이어도 15:20 에 시작한 감시면 감지, 11J 보완 3). 반환 {code: 기록}"""
+        at = at or self.hms()
+        if not (self.t["stop_from"] <= at and at[:5] <= self.t["stop_until"][:5]):
+            return {}
+        out = {}
         for c, h in held.items():
             s = stops.get(c)
-            if s is None or h["sellable"] <= 0 or not (h["cur_price"] <= s):
-                continue
-            out.append(self._send("stop", "sell", c, h["sellable"], None, "3", kind_of(c),
-                                  f"손절 (현재가 {h['cur_price']:.0f} <= 손절가 {s:.0f}, {now})", "stop",
-                                  lambda c=c, q=h["sellable"]: self.b.sell_market(c, q), retry_now=False,
-                                  window=(self.t["stop_from"], self.t["stop_until"], True),
-                                  extra={"stop_price": s, "first_seen": {"time": now, "price": h["cur_price"]}, "held_qty_before": int(h["qty"]),
-                                         "pre_qty": int(h.get("acct_qty", h["qty"]))}))
+            if s is not None and h["cur_price"] == h["cur_price"] and h["cur_price"] < s:
+                out[c] = {"since": f"{self.date()} {at}", "price": float(h["cur_price"]), "stop": float(s)}
         return out
 
+    def send_duties(self, duties, inputs, kind_of=lambda c: "본래"):
+        """09:00 ~ 15:29 매도 의무 시장가 (15:20 뒤는 마감 동시호가 = 종가 체결). duties = {code: 의무 표시(new_duty)}, inputs = duty_inputs.
+        손절 진행 중(kind stop) = 단계 stop, 추세 매도(kind trend) = 단계 trend_late ("시가 매도 아님", 08:30 ~ 08:59 에 못 판 것·남은 수량).
+        거부 횟수 상한 없음 (retry_wait 로 간격만 늘림). 한 종목은 한 분에 한 번"""
+        now = self.hms()
+        if not (self.t["stop_from"] <= now < self.t["stop_send_until"]):
+            return []
+        win = (self.t["stop_from"], self.t["stop_send_until"], False)
+        auction = {"closing_auction": True} if now >= self.t["stop_until"] else {}
+        out = []
+        for c, du in duties.items():
+            h = inputs.get(c)
+            if h is None:
+                continue
+            if du.get("kind", "stop") == "stop":
+                seen = " ".join(x for x in (du.get("since"), du.get("at")) if x)
+                why = du.get("reason") or (f"현재가 {du['price']:.0f} < 손절가 {du['stop']:.0f}" if du.get("price") else "")
+                out.append(self.duty_sell("stop", c, h, kind_of(c), f"손절 (감지 {seen} {why}, 지금 {now}", "stop", win, False,
+                                          extra={"stop_price": du.get("stop"), "first_seen": {"time": du.get("at"), "price": du.get("price")}, **auction}))
+            else:
+                out.append(self.duty_sell("trend_late", c, h, kind_of(c), f"추세 매도 늦음 — 시가 매도 아님 ({du.get('reason')}, {now} 장중 시장가",
+                                          "open", win, False, extra={"not_open": True, **auction}))
+        return out
+
+    def stop_check(self, held, stops, kind_of=lambda c: "본래", triggered=None, detect=True, at=None):
+        """감지 + 보내기 한 번에 (도구·시험용). held = {code: {qty, sellable, cur_price}} (계좌 보유로 봄).
+        triggered: 매도 의무 {code: 표시} (새로 감지한 것을 넣음, 없으면 이번 호출 안에서만)"""
+        triggered = triggered if triggered is not None else {}
+        if detect:
+            new = {c: r for c, r in self.detect_stops(held, stops, at=at).items() if c not in triggered}
+            for c, r in new.items():
+                self.notify(f"[손절 진행 중] {c} 현재가 {r['price']:.0f} < 손절가 {r['stop']:.0f} — 팔릴 때까지 매 분 시장가 (가격이 반등해도)")
+                triggered[c] = new_duty("stop", r["since"], f"현재가 {r['price']:.0f} < 손절가 {r['stop']:.0f}", price=r["price"], stop=r["stop"])
+        return self.send_duties(triggered, held, kind_of)
+
     def trend_sells(self, targets, held, kind_of=lambda c: "본래"):
-        """targets: 전날 장 마감 후 판정한 매도 대상 + 전날 남은 매도(next_open_sells). 08:30 ~ 08:59 시장가"""
+        """targets: 다음 날 시가 매도 목록 (추세 매도·전날 남은 매도 의무). 08:30 ~ 08:59 시장가, 거부면 1초 뒤 1회.
+        held = duty_inputs (도구·시험은 계좌 보유 {qty, sellable}). 못 판 것·남은 수량은 09:00 이후 send_duties 가 맡음"""
         now = self.hms()
         if not (self.t["trend_sell_from"] <= now <= self.t["trend_sell_until"]):
             return []
         out = []
         for c in dict.fromkeys(list(targets)):
             h = held.get(c)
-            if not h or h["sellable"] <= 0:
+            if not h:
                 continue
-            out.append(self._send("trend_sell", "sell", c, h["sellable"], None, "3", kind_of(c), "추세 매도 (전날 종가 < 20일선) 또는 전날 남은 매도",
-                                  "open", lambda c=c, q=h["sellable"]: self.b.sell_market(c, q), retry_now=True,
-                                  window=(self.t["trend_sell_from"], self.t["trend_sell_until"], True),
-                                  extra={"held_qty_before": int(h.get("qty", h["sellable"])), "pre_qty": int(h.get("qty", h["sellable"]))}))
+            out.append(self.duty_sell("trend_sell", c, h, kind_of(c), "추세 매도 (전날 종가 < 20일선, 또는 전날 남은 매도", "open",
+                                      (self.t["trend_sell_from"], self.t["trend_sell_until"], True), True))
         return out
 
     # ---------------------------------------------------------- 15:35 확인 (랜덤엔드)

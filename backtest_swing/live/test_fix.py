@@ -3,6 +3,8 @@
 
   python -m unittest backtest_swing/live/test_fix.py -v
 """
+import os  # noqa: E402
+os.environ["LIVE_CONFIG"] = "example"  # 11K 보완 8: 시험은 로컬 config.json 을 읽지 않음 (config.example.json 만)
 import json
 import os
 import shutil
@@ -13,7 +15,7 @@ import unittest
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_orders import PLAN, FakeClock, FakeKiwoom, sends  # noqa: E402
+from test_orders import PLAN, FakeClock, FakeKiwoom, acct_view, sends  # noqa: E402
 import common as C  # noqa: E402
 import engine as E  # noqa: E402
 import orders as O  # noqa: E402
@@ -78,21 +80,21 @@ class Orders(unittest.TestCase):
         self.assertEqual(r["status"], O.NOT_SENT)
         self.assertTrue(r["resendable"])
         clk.t = pd.Timestamp("2026-10-26 10:03:00")
-        om.stop_check(held, {"084670": 30000})
+        om.stop_check(acct_view(fk, held), {"084670": 30000})
         self.assertEqual(len(sends(fk, "kt10001")), 2)
-        # 흔적 있음 (잔고가 줄었음) -> 다시 보내지 않음
+        # 흔적 있음 (잔고가 줄고 남은 10주는 걸린 매도로 매도 가능 0) -> 다시 보내지 않음 (11J 보완 3: 계좌 매도 가능 수량이 정답)
         clk2, notes2 = FakeClock("2026-10-26 10:00:00"), []
         fk2 = FakeKiwoom(clk2)
         fk2.script["kt10001"] = ["timeout"]
         om2 = O.OrderManager(O.Broker(fk2, allow_orders=True), clock=clk2, sleep=clk2.sleep, notify=notes2.append)
         r2 = om2.stop_check(held, {"084670": 30000})[0]
-        fk2.balance_rows = [bal_row("084670", 10)]
+        fk2.balance_rows = [bal_row("084670", 10, sellable=0)]
         for sec in (5, 30, 120):
             clk2.t = pd.Timestamp("2026-10-26 10:00:00") + pd.Timedelta(seconds=sec)
             om2.reconcile()
         self.assertEqual(r2["status"], O.UNKNOWN)
         clk2.t = pd.Timestamp("2026-10-26 10:03:00")
-        om2.stop_check(held, {"084670": 30000})
+        om2.stop_check(acct_view(fk2, held), {"084670": 30000})
         self.assertEqual(len(sends(fk2, "kt10001")), 1)
         # 흔적 있음 (미체결 조회에 보임) -> ACCEPTED, 다시 보내지 않음
         clk3 = FakeClock("2026-10-26 10:00:00")
@@ -105,7 +107,7 @@ class Orders(unittest.TestCase):
             clk3.t = pd.Timestamp("2026-10-26 10:00:00") + pd.Timedelta(seconds=sec)
             om3.reconcile()
         self.assertEqual(r3["status"], O.ACCEPTED)
-        om3.stop_check(held, {"084670": 30000})
+        om3.stop_check(acct_view(fk3, held), {"084670": 30000})
         self.assertEqual(len(sends(fk3, "kt10001")), 1)
 
     def test_buy_unknown_not_resent_before_1535(self):
@@ -284,7 +286,7 @@ class ResidentRules(unittest.TestCase):
 
     def test_b3_holding_mismatch_blocks_buy(self):
         C.atomic_json(self.R.POSITIONS, {"held": {"084670": {"qty": 10, "stop_price": 1}}, "next_open_sells": []})
-        self.fk.balance_rows = [bal_row("084670", 5)]
+        self.fk.balance_rows = [bal_row("084670", 10), bal_row("005930", 3)]   # 11K 보완 3: 보유 종목 수량 변화는 그 종목만 수동 확인, 장부에 없는 종목은 보유 불일치
         self.clk.at("10:00:00")
         self.res.ctx["quote_caller"] = None
         self.res.stop_minute = self.res.stop_minute  # 시세 대신 고정 값

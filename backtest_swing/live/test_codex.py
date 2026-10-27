@@ -4,6 +4,8 @@ Codex 리뷰(11E, 2026-10-24) 1 ~ 27 재현 시험. 상태 있는 가짜 서버(
 
   python -m unittest backtest_swing/live/test_codex.py -v
 """
+import os  # noqa: E402
+os.environ["LIVE_CONFIG"] = "example"  # 11K 보완 8: 시험은 로컬 config.json 을 읽지 않음 (config.example.json 만)
 import json
 import multiprocessing
 import os
@@ -52,13 +54,15 @@ class Base(unittest.TestCase):
         R.APPROVED, R.LEDGER = os.path.join(self.tmp, "approved.json"), os.path.join(self.tmp, "ledger.json")
         R.LOG_DIR, R.SNAP_DIR = os.path.join(self.tmp, "logs"), os.path.join(self.tmp, "snaps")
         os.makedirs(R.LOG_DIR)
+        self._saved_alert_paths = (R.ALERTS, R.ALERTS_PENDING)                  # 11J 보완 3: 정상 종료·시작 시험이 실제 알림 파일·잠금에 쓰지 않게
+        R.ALERTS, R.ALERTS_PENDING = os.path.join(R.LOG_DIR, "alerts.log"), os.path.join(R.LOG_DIR, "alerts_pending.json")
         C.atomic_json(R.LEDGER, {"as_of": "2026-10-23", "strategy": [], "full": [], "version": 3})
         self.alerts = []
         R.alert = self.alerts.append
         R.Caller = lambda *a, **k: None
         P.raw_atr20 = lambda code, until, today_row=None: (10000.0, 500.0)   # 임시 손절가 = 평균단가 - 850
         self.quotes, self.cv, self.judged = {}, {}, {}
-        Q.snapshot = lambda caller, codes: (None, pd.DataFrame({"code": list(codes), "close": [self.quotes.get(c, 99999.0) for c in codes]}), {})
+        Q.snapshot = lambda caller, codes, **k: (None, pd.DataFrame({"code": list(codes), "close": [self.quotes.get(c, 99999.0) for c in codes]}), {})
         Q.bars_today = lambda caller, code, day: code
         Q.close_values = lambda b: self.cv.get(b)
         self.clk = FakeClock("2026-10-26 15:22:00")
@@ -75,6 +79,9 @@ class Base(unittest.TestCase):
          P.raw_atr20, Q.snapshot, Q.bars_today, Q.close_values, Q.index_now) = self.saved
         R.CFG.clear()
         R.CFG.update(cfg)
+        R.ALERTS, R.ALERTS_PENDING = self._saved_alert_paths
+        import notify as N
+        N.flush(5)                                                                 # 이 시험의 알림 파일 쓰기가 끝난 뒤 임시 폴더를 지움
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def resident(self):
@@ -83,6 +90,7 @@ class Base(unittest.TestCase):
         res.clock, res.sleep = self.clk, self.clk.sleep
         res.new_broker = lambda: O.Broker(self.fk, allow_orders=True)
         res.request_prep = lambda reason: None
+        res.spawn_monthly = lambda *a: (_ for _ in ()).throw(AssertionError("시험에서 실제 월별 모델 프로세스"))  # 11K 보완 1: 시험은 가짜만
         res.judge = lambda codes, day, cvs=None: {c: dict(self.judged[c]) for c in codes if c in self.judged and (cvs is None or c in cvs)}
         return res
 
@@ -210,7 +218,7 @@ class Codex(Base):
         res.request_prep = lambda reason: self.R.Resident.request_prep(res, reason)
         res._prep_work = lambda day, need: setattr(res, "prep_result", {"error": "RuntimeError('적재 실패')"})
         calls = []
-        res.stop_minute = lambda: calls.append(self.clk().strftime("%H:%M"))
+        res.stop_minute = lambda **k: calls.append(self.clk().strftime("%H:%M"))
         self.clk.at("10:00:00")
         res.tick(self.clk())
         res.prep_thread.join()
@@ -376,7 +384,7 @@ class Codex(Base):
     def test_11_stop_runs_every_minute_regardless_of_heartbeat(self):
         res = self.started("10:00:00")
         calls = []
-        res.stop_minute = lambda: calls.append(self.clk().strftime("%H:%M:%S"))
+        res.stop_minute = lambda **k: calls.append(self.clk().strftime("%H:%M:%S"))
         res.tick(self.clk())
         res.heartbeat("stop")
         self.clk.at("10:00:30")
@@ -404,7 +412,10 @@ class Codex(Base):
         self.assertIn("084670", jl(self.R.POSITIONS)["next_open_sells"])
         self.clk.at("15:36:00")
         res2.close_check()
-        self.assertNotIn("084670", jl(self.R.POSITIONS)["next_open_sells"])
+        self.assertIn("084670", jl(self.R.POSITIONS)["next_open_sells"])       # 11J 보완 3 R1: 계좌 보유 0 한 번은 기록만
+        self.clk.at("15:41:00")
+        res2.close_check()
+        self.assertNotIn("084670", jl(self.R.POSITIONS)["next_open_sells"])    # 1분 이상 뒤 다시 0 -> 의무 끝, 목록에서 빠짐
 
     # ---------------------------------------------------------------- 13
     def test_13_close_check_incomplete_fails_but_settle_runs(self):
@@ -567,6 +578,7 @@ class Codex(Base):
     # ---------------------------------------------------------------- 20
     def test_20_cash_check(self):
         self.prev_state(steps=("after_close",), settlement={"d2": 30_000_000.0})
+        self.fk.fee = 0.0035                                   # 11K 11: 모의 서버 수수료 0.35% (env mock 대조 수수료와 같음)
         res = self.started("15:22:00")
         res.buy()
         no = res.om.records[0]["ord_no"]
@@ -584,7 +596,7 @@ class Codex(Base):
         self.assertTrue(any("현금 차이" in a for a in self.alerts))
 
     # ---------------------------------------------------------------- 21
-    def test_21_official_vs_1530_records_diffs_only(self):
+    def test_21_official_vs_1530_applies_official(self):
         P.save(self.R.POSITIONS, {"held": {"084670": {"qty": 28, "entry_date": "2026-10-20", "stop_price": 30000.0, "judged_on": "2026-10-23",
                                                       "judged_by": "15:30 1분봉", "close_1530": 33000.0, "trend_sell_next_open": False}},
                                   "next_open_sells": {}})
@@ -593,8 +605,12 @@ class Codex(Base):
         res.official_vs_1530()
         o = res.day.s["official_vs_1530"]
         self.assertEqual((o["date"], o["checked"]), ("2026-10-23", 1))
-        self.assertEqual(o["diffs"], [{"code": "084670", "close_1530": 33000.0, "close_official": 33100.0, "trend_1530": False, "trend_official": True}])
-        self.assertFalse(jl(self.R.POSITIONS)["held"]["084670"]["trend_sell_next_open"])     # 판단은 바꾸지 않음
+        self.assertEqual(o["diffs"], [{"code": "084670", "close_1530": 33000.0, "close_official": 33100.0, "trend_1530": False, "trend_official": True,
+                                       "applied": "추세 매도 의무 추가"}])
+        p = jl(self.R.POSITIONS)                                       # 11K 3: 다르면 공식 값을 씀 (예전: 기록만)
+        self.assertTrue(p["held"]["084670"]["trend_sell_next_open"])
+        self.assertEqual((p["sell_duty"]["084670"]["kind"], p["held"]["084670"]["judged_by"]), ("trend", "공식 일봉 (다음 날 재판단)"))
+        self.assertIn("084670", p["next_open_sells"])
 
     # ---------------------------------------------------------------- 22
     def test_22_dead_worker_is_pool_error_and_blocks_buys_only(self):
@@ -729,11 +745,14 @@ class Codex(Base):
         self.fk.script["kt10000"] = ["reject", "accept"]
         om.place_buys(PLAN, "본래")
         self.assertEqual(len(sends(self.fk)), 1)                     # 1초 뒤 15:28:00.5 -> 재시도 안 보냄
-        self.clk.t = pd.Timestamp("2026-10-26 15:20:10")
+        self.clk.t = pd.Timestamp("2026-10-26 15:21:10")
         om2 = O.OrderManager(O.Broker(self.fk, allow_orders=True), clock=self.clk, sleep=self.clk.sleep)
         self.fk.script["kt10001"] = ["reject", "accept"]
         om2.stop_check({"084670": {"qty": 1, "sellable": 1, "cur_price": 1}}, {"084670": 2})
-        self.assertEqual(len(sends(self.fk, "kt10001")), 0)          # 손절 시간창(~15:20) 밖
+        self.assertEqual(len(sends(self.fk, "kt10001")), 0)          # 새 손절 감지는 15:20 의 분까지 (11J)
+        self.clk.t = pd.Timestamp("2026-10-26 15:29:00")
+        om2.stop_check({"084670": {"qty": 1, "sellable": 1, "cur_price": 1}}, {"084670": 2}, triggered={"084670": {"since": "x", "price": 1, "stop": 2}})
+        self.assertEqual(len(sends(self.fk, "kt10001")), 0)          # 손절 진행 중이어도 15:29 부터는 안 보냄 (마감 동시호가 끝)
 
     # ---------------------------------------------------------------- 27
     def test_27_same_day_failure_of_candidate_blocks_buys(self):

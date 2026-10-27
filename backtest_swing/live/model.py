@@ -43,13 +43,17 @@ def expected_features():
     return [c for c in names if c not in m.s5.NON_FEATURES and c != "is_kospi"]
 
 
-def train(month, out_dir=None):
-    """out_dir 를 주면 그 폴더에 저장 (모델 재현 확인용 임시 폴더, model_repro.py). 없으면 models_live/stage5/{month}"""
+def train(month, out_dir=None, dataset=None, plan=None):
+    """out_dir 를 주면 그 폴더에 저장 (모델 재현 확인용 임시 폴더, model_repro.py). 없으면 models_live/stage5/{month}.
+    11K 1: dataset = 다시 만든 데이터셋 경로, plan = (재학습일, 학습 끝 날짜) — KRX 휴장일 달력으로 계산한 값 (monthly.py).
+    plan 이 없으면 예전처럼 데이터셋 날짜로 (stage4_model.months)"""
     t0 = time.time()
-    ds = pd.read_parquet(DATASET)
+    dataset = dataset or DATASET
+    ds = pd.read_parquet(dataset)
     cols = m.feature_cols(ds)
     assert len(cols) == 41 and "is_kospi" not in cols
-    plan = month_plan(ds, month)
+    plan_source = "krx_holidays 달력 (11K 1)" if plan else "데이터셋 날짜 (stage4_model.months)"
+    plan = (pd.Timestamp(plan[0]), pd.Timestamp(plan[1])) if plan else month_plan(ds, month)
     last_day = ds.date.max()
     if plan is None:
         return {"month": month, "trained": False,
@@ -72,7 +76,8 @@ def train(month, out_dir=None):
         files[f"seed{seed}.txt"] = sha256(p)
         preds[f"seed{seed}"] = [float(x) for x in b.predict(Xf)]
     meta = {"month": month, "retrain_day": str(first_day.date()), "train_end": str(cutoff.date()), "train_rows": int(len(tr_idx)),
-            "features": cols, "files": files, "git_commit": git_commit(), "dataset": DATASET, "dataset_sha256": sha256(DATASET),
+            "features": cols, "files": files, "git_commit": git_commit(), "dataset": dataset, "dataset_sha256": sha256(dataset),
+            "dataset_last_date": str(ds.date.max().date()), "plan_source": plan_source,
             "params": sm.PARAMS, "n_trees": sm.N_TREES, "seeds": m.SEEDS_MAIN, "lightgbm": lgb.__version__,
             "fixed_sample": {"rows": [{"code": str(ds.code.iat[tr_idx[i]]), "date": str(ds.date.iat[tr_idx[i]].date())} for i in fixed],
                              "X": [[float(v) for v in row] for row in Xf], "pred": preds,
@@ -102,7 +107,11 @@ def load(month, model_dir=None):
              for b, s in zip(boosters, meta["seeds"])]
     chk["fixed_pred_max_abs_diff"] = max(diffs)
     chk["fixed_pred_ok"] = max(diffs) == 0.0
-    chk["ok"] = bool(chk["sha256_ok"] and chk["features_ok"] and chk["fixed_pred_ok"])
+    # 11J: meta 의 월 == 요청한 월, 시드가 정확히 1 ~ 5 (다르면 그날 신규 매수 안 함 + 알림)
+    chk["month_ok"] = meta.get("month") == month
+    chk["seeds_ok"] = [int(x) for x in meta.get("seeds") or []] == [1, 2, 3, 4, 5]
+    chk["meta_month"], chk["meta_seeds"] = meta.get("month"), meta.get("seeds")
+    chk["ok"] = bool(chk["sha256_ok"] and chk["features_ok"] and chk["fixed_pred_ok"] and chk["month_ok"] and chk["seeds_ok"])
     return boosters, meta["features"], meta, chk
 
 

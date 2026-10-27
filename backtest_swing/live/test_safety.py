@@ -3,6 +3,8 @@
 
   python -m unittest backtest_swing/live/test_safety.py -v
 """
+import os  # noqa: E402
+os.environ["LIVE_CONFIG"] = "example"  # 11K 보완 8: 시험은 로컬 config.json 을 읽지 않음 (config.example.json 만)
 import json
 import os
 import shutil
@@ -13,7 +15,7 @@ import unittest
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from test_orders import PLAN, Crash, FakeClock, FakeKiwoom, sends  # noqa: E402
+from test_orders import PLAN, Crash, FakeClock, FakeKiwoom, acct_view, hold, sends  # noqa: E402
 import common as C  # noqa: E402
 import orders as O  # noqa: E402
 import state as S  # noqa: E402
@@ -33,7 +35,8 @@ class Restart(unittest.TestCase):
 
     def _crash_then_restart(self, t, first, again, tr):
         clk, notes = FakeClock(t), []
-        fk = FakeKiwoom(clk)
+        self.fk = fk = FakeKiwoom(clk)
+        hold(fk, "084670", 28)
         fk.script[tr] = ["accept_then_crash"]
         om = make(self.path, clk, fk, notes)
         with self.assertRaises(Crash):
@@ -56,13 +59,13 @@ class Restart(unittest.TestCase):
 
     def test_trend_sell_crash_restart_no_resend(self):
         held = {"084670": {"qty": 28, "sellable": 28, "cur_price": 31000}}
-        self._crash_then_restart("2026-10-26 08:31:00", lambda om: om.trend_sells(["084670"], held),
-                                 lambda om: om.trend_sells(["084670"], held), "kt10001")
+        self._crash_then_restart("2026-10-26 08:31:00", lambda om: om.trend_sells(["084670"], held),   # 다시: 접수된 주문이 매도 가능 수량을 묶음
+                                 lambda om: om.trend_sells(["084670"], acct_view(self.fk, held)), "kt10001")
 
     def test_stop_crash_restart_no_resend(self):
         held = {"084670": {"qty": 28, "sellable": 28, "cur_price": 29000}}
         self._crash_then_restart("2026-10-26 10:00:00", lambda om: om.stop_check(held, {"084670": 30000}),
-                                 lambda om: om.stop_check(held, {"084670": 30000}), "kt10001")
+                                 lambda om: om.stop_check(acct_view(self.fk, held), {"084670": 30000}), "kt10001")
 
     def test_unknown_then_late_appearance(self):
         clk, notes = FakeClock("2026-10-26 15:21:05"), []
@@ -93,26 +96,29 @@ class Restart(unittest.TestCase):
             self.assertEqual(len(sends(fk)), 1, act)
             self.assertTrue(any("응답 없음" in n for n in notes), act)
 
-    def test_stop_rejected_retry_next_minute_max5(self):
+    def test_stop_rejected_retry_no_cap_backoff(self):
         clk, notes = FakeClock("2026-10-26 10:00:00"), []
         fk = FakeKiwoom(clk)
         fk.script["kt10001"] = ["reject"] * 6
         om = make(self.path, clk, fk, notes)
         held = {"084670": {"qty": 28, "sellable": 28, "cur_price": 29000}}
-        om.stop_check(held, {"084670": 30000})
+        tr = {}
+        om.stop_check(held, {"084670": 30000}, triggered=tr)
         self.assertEqual(len(sends(fk, "kt10001")), 1)        # 같은 분에 바로 다시 보내지 않음
         for _ in range(6):
             clk.t += pd.Timedelta(minutes=1)
-            om.stop_check(held, {"084670": 30000})
-        self.assertEqual(len(sends(fk, "kt10001")), 5)        # 하루 최대 5회
-        self.assertEqual(sum("주문 거부" in n for n in notes), 5)  # 매번 알림
+            om.stop_check(held, {"084670": 30000}, triggered=tr)
+        self.assertEqual(len(sends(fk, "kt10001")), 6)        # 11J: 5회 상한 없음 — 거부 5회 뒤 2분 간격 (6분 동안 6번)
+        self.assertEqual(sum("주문 거부" in n for n in notes), 6)  # 매번 알림
         # 거부 뒤 접수되면 그 뒤로는 안 보냄
         clk2, notes2 = FakeClock("2026-10-26 10:00:00"), []
         fk2 = FakeKiwoom(clk2)
         fk2.script["kt10001"] = ["reject", "accept"]
+        hold(fk2, "084670", 28)
         om2 = O.OrderManager(O.Broker(fk2, allow_orders=True), clock=clk2, sleep=clk2.sleep, notify=notes2.append)
+        tr2 = {}
         for _ in range(4):
-            om2.stop_check(held, {"084670": 30000})
+            om2.stop_check(acct_view(fk2, held), {"084670": 30000}, triggered=tr2)
             clk2.t += pd.Timedelta(minutes=1)
         self.assertEqual(len(sends(fk2, "kt10001")), 2)
 

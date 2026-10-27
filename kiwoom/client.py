@@ -7,7 +7,7 @@ import requests
 
 from .auth import AuthManager
 from .config import Settings, get_settings
-from .errors import HTTPError, NotSent
+from .errors import AuthError, HTTPError, NotSent
 
 
 import time
@@ -61,6 +61,7 @@ class KiwoomRestClient:
         retry_429: bool = True,
         max_wait: float | None = None,
         before_send=None,
+        timeout: float | None = None,
     ) -> requests.Response:
         # 요청 재시도 로직 (429 대응). retry_429=False 면 429 를 받는 즉시 None 을 돌려준다
         # (주문 TR: 재시도는 호출하는 쪽이 마감 시각을 확인하며 한다, 2026-10-24 Codex 확인 리뷰 26)
@@ -72,7 +73,12 @@ class KiwoomRestClient:
             elif self.rate_limiter.wait(max_wait=max_wait) is False:
                 raise NotSent(f"유량 대기 상한 {max_wait}초 초과 (api-id={tr_code}) - 보내지 않음")
             
-            token = self.auth.get_token()
+            try:  # 손절 감시 안 토큰 발급도 같은 제한. 만료 전 기존 토큰은 발급 실패에도 씀, 그 밖의 발급 실패 = 보내지 않음 (AuthError)
+                token = self.auth.get_token(**({"timeout": timeout} if timeout is not None else {}))
+            except AuthError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                raise AuthError(f"토큰 발급 실패 - 보내지 않음 (api-id={tr_code}): {e!r}"[:300]) from e
             # before_send: 유량 대기·토큰 뒤 보내기 바로 앞 확인 (주문 TR 마감 시각, 2026-10-24 Codex 2차 확인 리뷰 4), False 면 NotSent
             if before_send is not None and not before_send():
                 raise NotSent(f"전송 직전 확인 실패: 마감 시각 지남 (api-id={tr_code}) - 보내지 않음")
@@ -90,7 +96,7 @@ class KiwoomRestClient:
                 params=params,
                 json=json,
                 headers=headers,
-                timeout=self.timeout,
+                timeout=self.timeout if timeout is None else timeout,  # timeout: 이 요청만의 시간 제한 (손절 감시 5초)
             )
             
             # 429 Too Many Requests 처리

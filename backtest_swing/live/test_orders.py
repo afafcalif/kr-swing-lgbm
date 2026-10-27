@@ -3,6 +3,8 @@
 
   python -m unittest backtest_swing/live/test_orders.py backtest_swing/live/test_safety.py -v
 """
+import os  # noqa: E402
+os.environ["LIVE_CONFIG"] = "example"  # 11K 보완 8: 시험은 로컬 config.json 을 읽지 않음 (config.example.json 만)
 import os
 import sys
 import tempfile
@@ -55,7 +57,9 @@ class FakeKiwoom:
     listbody(HTTP 200 인데 본문이 목록).
     조회 TR read_script[tr] = 페이지마다 쓸 동작: ok, rc_error(HTTP 200 + return_code != 0), listbody, missing(필수 필드 없음), nan(금액 빈칸), http502.
     체결(fill)하면 보유 수량·매도 가능 수량·예수금(D+2·주문가능)이 바뀐다. page_size 를 주면 목록 조회를 cont-yn/next-key 로 나눠 준다.
-    auto_fill[code] = 가격 이면 그 종목 시장가 주문은 접수 즉시 그 가격에 체결."""
+    auto_fill[code] = 가격 이면 그 종목 시장가 주문은 접수 즉시 그 가격에 체결.
+    매도 주문이 접수되면 증권사처럼 그 수량만큼 매도 가능 수량(trde_able_qty)을 묶고, 체결·취소되면 풀린다 (11J 보완 2).
+    매도 가능 수량(보유 목록에 없으면 0)을 넘는 매도는 증권사처럼 거부한다 — 수량을 줄여 받지 않음 (11J 보완 3)."""
 
     def __init__(self, clock):
         self.clock, self.script, self.calls, self.orders, self.fill_rows, self.n = clock, {}, [], {}, [], 0
@@ -64,6 +68,7 @@ class FakeKiwoom:
         self.balance_rows = []        # kt00018 보유 목록
         self.orderable = 30_000_000   # kt00001 주문가능금액
         self.d2 = None                # kt00001 D+2 추정예수금 (None 이면 주문가능금액과 같음)
+        self.fee = None                 # 매매수수료율 (11K 11: 모의 서버는 0.35%)
         self.page_size = None
         self.auto_fill = {}
         self.pages = []               # (tr, cont_yn, next_key)
@@ -88,14 +93,14 @@ class FakeKiwoom:
             q0, a0 = int(r["rmnd_qty"]), float(r["pur_pric"])
             r["pur_pric"] = str(round((q0 * a0 + amt) / (q0 + qty)))
             r["rmnd_qty"], r["trde_able_qty"] = str(q0 + qty), str(int(r["trde_able_qty"]) + qty)
-            cost = amt * (1 + sb.COMMISSION)
+            cost = amt * (1 + (sb.COMMISSION if self.fee is None else self.fee))
             self.d2 -= cost
             self.orderable -= cost
         else:
             r["rmnd_qty"], r["trde_able_qty"] = str(int(r["rmnd_qty"]) - qty), str(max(int(r["trde_able_qty"]) - qty, 0))
             if int(r["rmnd_qty"]) <= 0:
                 self.balance_rows.remove(r)
-            got = amt * (1 - sb.COMMISSION - sb.SELL_TAX.get(int(self.clock().year), 0.002))
+            got = amt * (1 - (sb.COMMISSION if self.fee is None else self.fee) - sb.SELL_TAX.get(int(self.clock().year), 0.002))
             self.d2 += got
             self.orderable += got
 
@@ -104,12 +109,26 @@ class FakeKiwoom:
         no = f"{self.n:07d}"
         self.orders[no] = {"ord_no": no, "stk_cd": body["stk_cd"], "ord_qty": body["ord_qty"], "io_tp_nm": "+매수" if tr == "kt10000" else "-매도",
                            "ord_pric": body.get("ord_uv", ""), "oso_qty": body["ord_qty"], "canceled": False,
-                           "_visible": self.clock() + pd.Timedelta(seconds=visible_after)}
+                           "_visible": self.clock() + pd.Timedelta(seconds=visible_after), "_locked": 0}
+        r = self._row(body["stk_cd"]) if tr == "kt10001" else None
+        if r is not None:  # 매도 가능 수량 묶음 (넘는 주문은 request 에서 이미 거부)
+            lock = int(body["ord_qty"])
+            r["trde_able_qty"], self.orders[no]["_locked"] = str(int(r["trde_able_qty"]) - lock), lock
         return no
+
+    def sellable(self, code):
+        r = self._row(code)
+        return int(r["trde_able_qty"]) if r is not None else 0
 
     def fill(self, no, qty, price, hms):
         o = self.orders[no]
         o["oso_qty"] = str(int(o["oso_qty"]) - qty)
+        if o.get("_locked"):  # 묶인 수량은 체결로 풀림 (매도 가능 수량에서 다시 빼지 않게 먼저 돌려 둔다)
+            back = min(qty, o["_locked"])
+            o["_locked"] -= back
+            r = self._row(o["stk_cd"])
+            if r is not None:
+                r["trde_able_qty"] = str(int(r["trde_able_qty"]) + back)
         self.fill_rows.append({"ord_no": no, "stk_cd": o["stk_cd"], "io_tp_nm": o["io_tp_nm"], "ord_qty": o["ord_qty"], "cntr_qty": str(qty),
                                "cntr_pric": str(price), "ord_tm": hms.replace(":", ""), "oso_qty": o["oso_qty"]})
         self._settle_fill(o["stk_cd"], "buy" if o["io_tp_nm"] == "+매수" else "sell", qty, price)
@@ -144,6 +163,9 @@ class FakeKiwoom:
             if ract == "http502":
                 raise HTTPError(502, "url", "Bad Gateway")
         act = self.script.get(tr_code, []).pop(0) if self.script.get(tr_code) else "accept"
+        if tr_code == "kt10001" and act not in ("reject", "timeout", "http503", "http400", "http400_rc", "error") \
+                and int(json["ord_qty"]) > self.sellable(json["stk_cd"]):
+            return Resp({"return_code": 1, "return_msg": f"[모의] 매도 가능 수량 부족 (주문 {json['ord_qty']}, 가능 {self.sellable(json['stk_cd'])})"})
         if tr_code in ("kt10000", "kt10001"):
             if act == "listbody":
                 self._new_order(json, tr_code)
@@ -186,6 +208,11 @@ class FakeKiwoom:
                 self.fill(o["ord_no"], int(o["oso_qty"]), int(o.get("ord_pric") or 0) or 1, self.clock().strftime("%H:%M:%S"))
                 return Resp({"return_code": 1, "return_msg": "[모의] 취소 가능 수량 없음"})
             o["canceled"], o["oso_qty"] = True, "0"
+            if o.get("_locked"):
+                r = self._row(o["stk_cd"])
+                if r is not None:
+                    r["trde_able_qty"] = str(int(r["trde_able_qty"]) + o["_locked"])
+                o["_locked"] = 0
             if act == "timeout_applied":    # 취소는 됐지만 응답 없음
                 raise requests.Timeout("cancel timeout (서버는 취소)")
             return Resp({"return_code": 0, "return_msg": "취소 접수", "ord_no": f"C{json['orig_ord_no']}"})
@@ -225,8 +252,36 @@ def setup(t="2026-10-23 15:21:05", path=None):
 PLAN = [{"code": "084670", "qty": 28, "limit_price": 33350, "skip": ""}]
 
 
+def wait_for(cond, timeout=5.0, step=0.02):
+    """조건이 참이 될 때까지 기다림 (최대 timeout 초, step 초마다 확인). 반환: 참이 됐으면 True.
+    시험은 고정 시간 대기 대신 이것을 쓴다 (느린 PC 에서도 같은 결과)"""
+    import time as _t
+    end = _t.time() + timeout
+    while True:
+        try:
+            if cond():
+                return True
+        except Exception:  # noqa: BLE001  (파일이 아직 없음·쓰는 중 등은 다시 확인)
+            pass
+        if _t.time() >= end:
+            return False
+        _t.sleep(step)
+
+
 def sends(fk, tr="kt10000"):
     return [c for c in fk.calls if c[1] == tr]
+
+
+def hold(fk, code, qty, sellable=None):
+    """가짜 서버 계좌에 보유 한 줄"""
+    fk.balance_rows.append({"stk_cd": f"A{code}", "rmnd_qty": str(qty), "trde_able_qty": str(qty if sellable is None else sellable),
+                            "pur_pric": "10000", "cur_prc": "10000"})
+
+
+def acct_view(fk, held):
+    """도구 형식 held({code: {qty, sellable, cur_price}})의 수량을 가짜 서버의 지금 계좌로 (11J 보완 3: 매도 의무 수량 = 같은 분 계좌 매도 가능 수량)"""
+    a = O.holdings(fk.request("kt00018", "POST", "/x").json())
+    return {c: {**h, "qty": a.get(c, {}).get("qty", 0), "sellable": a.get(c, {}).get("sellable", 0)} for c, h in held.items()}
 
 
 class T(unittest.TestCase):
@@ -363,8 +418,10 @@ class T(unittest.TestCase):
     def test_stop_loss_market_once(self):
         clk, fk, om, _ = setup("2026-10-23 10:00:00")
         held = {"084670": {"qty": 28, "avg_price": 32100, "cur_price": 29900, "sellable": 28}}
-        om.stop_check(held, {"084670": 30000})
-        om.stop_check(held, {"084670": 30000})
+        hold(fk, "084670", 28)
+        tr = {}
+        om.stop_check(acct_view(fk, held), {"084670": 30000}, triggered=tr)
+        om.stop_check(acct_view(fk, held), {"084670": 30000}, triggered=tr)   # 접수된 28주가 매도 가능 수량을 묶음 -> 안 보냄
         s = sends(fk, "kt10001")
         self.assertEqual(len(s), 1)
         self.assertEqual(s[0][2]["trde_tp"], "3")
@@ -376,6 +433,7 @@ class T(unittest.TestCase):
     def test_locked_sell_unfilled_carry_to_next_open(self):
         clk, fk, om, _ = setup("2026-10-23 10:00:00")
         held = {"084670": {"qty": 28, "avg_price": 32100, "cur_price": 22000, "sellable": 28}}
+        hold(fk, "084670", 28)
         r = om.stop_check(held, {"084670": 30000})[0]
         clk.at("15:35:00")
         om.close_check()
@@ -383,6 +441,7 @@ class T(unittest.TestCase):
         self.assertEqual(om.next_open_sells, ["084670"])
         self.assertEqual(len([c for c in fk.calls if c[1] == "kt10003"]), 1)
         clk3, fk3, om3, _ = setup("2026-10-24 08:31:00")
+        hold(fk3, "084670", 28)
         om3.trend_sells(om.next_open_sells, held)
         self.assertEqual(len(sends(fk3, "kt10001")), 1)
         clk4, fk4, om4, _ = setup("2026-10-24 09:00:30")
@@ -419,6 +478,7 @@ class T(unittest.TestCase):
         clk, fk, om, notes = setup("2026-10-23 10:00:00")
         watch = O.AccountWatch(notify=notes.append, n_alert=3)
         pos = {"held": {"084670": {"qty": 28, "stop_price": 30000, "kind": "본래"}}}
+        hold(fk, "084670", 28)
         price = {"v": 31000}
 
         def quote(codes):
@@ -453,11 +513,12 @@ class T(unittest.TestCase):
         clk, fk, om, notes = setup("2026-10-23 11:00:00")
         watch = O.AccountWatch(notify=notes.append)
         pos = {"held": {"084670": {"qty": 28, "stop_price": 30000}}}
-        bal = lambda: {"acnt_evlt_remn_indv_tot": [{"stk_cd": "A084670", "rmnd_qty": "20", "trde_able_qty": "20", "pur_pric": "1", "cur_prc": "31000"}]}  # noqa: E731
+        bal = lambda: {"acnt_evlt_remn_indv_tot": [{"stk_cd": "A084670", "rmnd_qty": "28", "trde_able_qty": "28", "pur_pric": "1", "cur_prc": "31000"},  # noqa: E731
+                                                   {"stk_cd": "A005930", "rmnd_qty": "20", "trde_able_qty": "20", "pur_pric": "1", "cur_prc": "1"}]}
         seen = set()
         r1 = O.stop_cycle(om, watch, pos, lambda cs: {c: 31000 for c in cs}, bal, clk(), seen)
         r2 = O.stop_cycle(om, watch, pos, lambda cs: {c: 31000 for c in cs}, bal, clk(), seen)
-        self.assertEqual(r1["mismatch"], {"084670": {"state": 28, "account": 20}})
+        self.assertEqual(r1["mismatch"], {"005930": {"state": 0, "account": 20}})   # 장부에 없는 종목 = 보유 불일치 (보유 종목 수량 변화는 qty_changed)
         self.assertEqual(r2["mismatch"], r1["mismatch"])
         self.assertEqual(sum("보유 불일치" in n for n in notes), 1)
         self.assertEqual(len(sends(fk, "kt10001")), 0)

@@ -11,20 +11,22 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import num  # noqa: E402
+from state import close_hhmm  # noqa: E402
 
 BATCH = 100
 AMOUNT_UNIT = 1_000_000  # ka10095 trde_prica: 백만원 (시험 B 에서 거래량 x 현재가와 대조해 기록)
 INDEX = (("kospi", "0", "001"), ("kosdaq", "1", "101"))
 
 
-def snapshot(caller, codes):
-    """ka10095 100종목씩. 반환: (응답 전체 DataFrame, 파싱 DataFrame, 기록)"""
+def snapshot(caller, codes, deadline=None, timeout=None):
+    """ka10095 100종목씩. 반환: (응답 전체 DataFrame, 파싱 DataFrame, 기록). deadline: Caller.post 의 대기 상한, timeout: HTTP 요청 하나의 시간 제한 (손절 감시, 11J)"""
     t0 = time.time()
     items, req = [], []
     for bi in range(0, len(codes), BATCH):
         batch = codes[bi:bi + BATCH]
         ts = pd.Timestamp.now()
-        j, _, _ = caller.post("ka10095", "/api/dostk/stkinfo", {"stk_cd": "|".join(batch)})
+        j, _, _ = caller.post("ka10095", "/api/dostk/stkinfo", {"stk_cd": "|".join(batch)}, **({"deadline": deadline} if deadline is not None else {}),
+                             **({"timeout": timeout} if timeout else {}))
         te = pd.Timestamp.now()
         got = j.get("atn_stk_infr") or []
         req.append({"batch": bi // BATCH, "n_req": len(batch), "n_resp": len(got), "sent": ts.strftime("%H:%M:%S.%f")[:-3],
@@ -62,7 +64,7 @@ def bars_today(caller, code, day):
     df = pd.DataFrame(rows)
     if len(df):
         df = df.drop_duplicates("ts")
-        df = df[df.ts.str[8:12] <= "1530"].sort_values("ts").reset_index(drop=True)
+        df = df[df.ts.str[8:12] <= close_hhmm(day)].sort_values("ts").reset_index(drop=True)  # 11K 2: 거래시간 변경일은 그날 폐장 봉까지
     return df
 
 
@@ -76,12 +78,12 @@ def close_values(bars):
 
 def index_close_today(caller, day):
     """ka20005 업종 1분봉 첫 페이지에서 그날 15:30 이하 마지막 봉 종가 (값은 100배)"""
-    out = {}
+    out, upto = {}, close_hhmm(day)  # 11K 2: 거래시간 변경일은 그날 폐장 시각
     for name, _, inds in INDEX:
         j, _, _ = caller.post("ka20005", "/api/dostk/chart", {"inds_cd": inds, "tic_scope": "1"})
         d = day.strftime("%Y%m%d")
         b = sorted((it["cntr_tm"], num(it.get("cur_prc")) / 100.0) for it in j.get("inds_min_pole_qry", []) or []
-                   if str(it.get("cntr_tm", ""))[:8] == d and str(it["cntr_tm"])[8:12] <= "1530")
+                   if str(it.get("cntr_tm", ""))[:8] == d and str(it["cntr_tm"])[8:12] <= upto)
         out[name] = b[-1][1] if b else np.nan
         out[name + "_ts"] = b[-1][0] if b else None
     return out

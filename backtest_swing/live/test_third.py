@@ -3,6 +3,8 @@ Codex 3차 확인 리뷰(11H, 2026-10-24) R1 ~ R7 재현 시험. 상태 있는 �
 
   python -m unittest backtest_swing/live/test_third.py -v
 """
+import os  # noqa: E402
+os.environ["LIVE_CONFIG"] = "example"  # 11K 보완 8: 시험은 로컬 config.json 을 읽지 않음 (config.example.json 만)
 import json
 import os
 import shutil

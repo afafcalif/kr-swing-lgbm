@@ -30,13 +30,15 @@ ALLOW = [
     # 실행 코드
     *(LIVE + f for f in (
         "__init__.py", "bar_timing.py", "common.py", "control.py", "daily.py", "engine.py", "firstrun.py",
-        "gapfill.py", "make_bundle.py", "measure.py", "model.py", "model_repro.py", "notify.py", "orders.py",
+        "gapfill.py", "make_bundle.py", "measure.py", "model.py", "model_repro.py", "monthly.py", "notify.py", "orders.py",
         "positions.py", "quotes.py", "replay.py", "resident.py", "run_day.py", "settings.py", "speed.py",
         "state.py", "update.py", "watchdog.py",
     )),
     # 시험 (가짜 서버·가짜 시계)
     *(LIVE + f for f in (
-        "test_codex.py", "test_confirm.py", "test_fix.py", "test_orders.py", "test_safety.py",
+        "test_broad1.py", "test_broad2.py", "test_broad3.py", "test_broad4.py", "test_broad5.py",
+        "test_broad6.py", "test_broad7.py", "test_broad8.py", "test_broad9.py",
+        "test_codex.py", "test_confirm.py", "test_fix.py", "test_mock1.py", "test_orders.py", "test_safety.py",
         "test_second.py", "test_third.py",
     )),
     # 스크립트·설정 예시·문서
@@ -45,6 +47,7 @@ ALLOW = [
         "register_tasks.ps1", "verify_bundle.ps1", "view_log.ps1",
         "config.example.json", "requirements_live.txt", "SETUP.md",
         "krx_holidays.json",  # 한국거래소 휴장일 (공개 정보, 거래일 판정에 필요)
+        "krx_special_hours.json",  # 거래시간 변경일 (공개 정보, 수능일·새해 첫날)
     )),
     # live/ 가 import 하는 키움 클라이언트 (키는 .env 에서 읽음, 값 없음)
     "kiwoom/__init__.py", "kiwoom/auth.py", "kiwoom/client.py", "kiwoom/config.py", "kiwoom/errors.py",
@@ -89,7 +92,7 @@ REWRITE = [
 ]
 # 원본 저장소 폴더(--src 경로, DRIVE_REPO)를 PUB_ROOT 로 바꿔야 하는 파일. 바뀐 곳이 없으면 실패.
 PATH_REWRITE = [LIVE + "config.example.json", LIVE + "register_tasks.ps1", LIVE + "verify_bundle.ps1",
-                LIVE + "make_bundle.py", LIVE + "SETUP.md"]
+                LIVE + "make_bundle.py", LIVE + "SETUP.md", LIVE + "test_broad8.py"]
 
 TEXT_EXT = {".py", ".md", ".json", ".txt", ".bat", ".ps1", ".csv", ".cfg", ".toml", ".yml", ".yaml", ".ini",
             ".gitignore", ".gitattributes"}

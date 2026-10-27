@@ -52,6 +52,57 @@ def prev_trading_day(day, hol=None):
     raise ValueError(f"{day} 앞 30일 안에 거래일 없음")
 
 
+# ---------------------------------------------------------------- 거래시간 변경일 (11K 2)
+
+SPECIAL_HOURS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "krx_special_hours.json")
+BASE_OPEN, BASE_CLOSE = "09:00:00", "15:30:00"
+NO_SHIFT = {"day_start", "measure_until"}  # 07:00 하루 시작, 날짜 값
+
+
+def special_hours(path=SPECIAL_HOURS_FILE):
+    """{날짜: {open, close, reason, confirmed, note}} (krx_special_hours.json, 없으면 빈 dict)"""
+    if not os.path.exists(path):
+        return {}
+    d = json.load(open(path, encoding="utf-8"))
+    return {pd.Timestamp(k).normalize(): v for k, v in d.items() if not k.startswith("_")}
+
+
+def _min(hms):
+    h, m, s = (int(x) for x in hms.split(":"))
+    return h * 60 + m + s / 60
+
+
+def day_hours(day, sp=None):
+    """그날 개장·폐장 시각과 평소 대비 지연(분). 반환 {open, close, open_shift, close_shift, special, reason, confirmed, note}"""
+    sp = special_hours() if sp is None else sp
+    e = sp.get(pd.Timestamp(day).normalize()) or {}
+    o, c = e.get("open", BASE_OPEN), e.get("close", BASE_CLOSE)
+    return {"open": o, "close": c, "open_shift": round(_min(o) - _min(BASE_OPEN)), "close_shift": round(_min(c) - _min(BASE_CLOSE)),
+            "special": bool(e), "reason": e.get("reason"), "confirmed": e.get("confirmed"), "note": e.get("note")}
+
+
+def shift_hms(hms, hours):
+    """시각 하나를 그날 기준으로: 12:00 앞은 개장 지연만큼, 뒤는 폐장 지연만큼 민다"""
+    sh = hours["open_shift"] if hms < "12:00:00" else hours["close_shift"]
+    if not sh:
+        return hms
+    return (pd.Timestamp(f"2000-01-01 {hms}") + pd.Timedelta(minutes=sh)).strftime("%H:%M:%S")
+
+
+def shift_times(base, hours):
+    """설정의 times(HH:MM:SS 값) 전체를 그날 기준으로 (day_start·날짜 값은 그대로)"""
+    out = {}
+    for k, v in base.items():
+        ok = isinstance(v, str) and len(v) == 8 and v[2] == ":" and v[5] == ":"
+        out[k] = shift_hms(v, hours) if ok and k not in NO_SHIFT else v
+    return out
+
+
+def close_hhmm(day, sp=None):
+    """그날 폐장 시각 "HHMM" (1분봉 종가 기준 봉, 평소 "1530")"""
+    return day_hours(day, sp)["close"].replace(":", "")[:4]
+
+
 def validate_snapshot(snap, day, min_traded=0.5, min_today=0.9):
     """스냅샷 확인: 거래량 > 0 종목 비율 >= min_traded, 시세 날짜(dt) = 오늘 비율 >= min_today. 반환 (ok, info)"""
     n = len(snap)
@@ -137,11 +188,35 @@ class Day:
         last = pd.Timestamp(f"{self.date.date()} {t}")
         return (self.clock() - last).total_seconds() >= backoff_s
 
-    def err(self, msg):
+    def err(self, msg, key=None):
+        """오류 기록. key 를 주면 나중에 그 오류가 풀렸을 때 resolve(key) 로 해결 표시 (11I)"""
         with self.lock:
             self.s["errors"].append(str(msg)[:800])
+            if key:
+                self.s.setdefault("error_keys", []).append({"i": len(self.s["errors"]) - 1, "key": key})
             self.save()
         self._emit("err", None, str(msg))
+
+    def tag_last_error(self, key):
+        with self.lock:
+            if self.s["errors"]:
+                self.s.setdefault("error_keys", []).append({"i": len(self.s["errors"]) - 1, "key": key})
+                self.save()
+
+    def resolve(self, key, by):
+        """11I: key 로 남긴 오류 중 아직 해결 표시가 없는 것을 해결로 표시 (오류 기록은 그대로 두고 errors_resolved 에 따로). 반환: 표시한 수"""
+        with self.lock:
+            done = {r["i"] for r in self.s.get("errors_resolved") or []}
+            new = [{"i": t["i"], "key": key, "error": self.s["errors"][t["i"]][:200], "resolved_at": self.hms(), "by": by}
+                   for t in self.s.get("error_keys") or [] if t["key"] == key and t["i"] not in done and t["i"] < len(self.s["errors"])]
+            if new:
+                self.s.setdefault("errors_resolved", []).extend(new)
+                self.save()
+        return len(new)
+
+    def open_error_count(self):
+        """해결 표시가 없는 오류 수"""
+        return len(self.s["errors"]) - len({r["i"] for r in self.s.get("errors_resolved") or []})
 
     def _emit(self, kind, step, obj):
         if self.listener is not None:

@@ -4,6 +4,8 @@ Codex 확인 리뷰(11F, 2026-10-24) 시험: N1 ~ N3, 5, 7, 15, 16, 26, 27 보�
 
   python -m unittest backtest_swing/live/test_confirm.py -v
 """
+import os  # noqa: E402
+os.environ["LIVE_CONFIG"] = "example"  # 11K 보완 8: 시험은 로컬 config.json 을 읽지 않음 (config.example.json 만)
 import json
 import os
 import shutil
@@ -220,7 +222,9 @@ class Confirm(Base):
         self.assertTrue(res.day.done("trend_sell"))
         self.assertEqual(len(sends(self.fk, "kt10001")), 0)
         pos = jl(self.R.POSITIONS)                                            # 08:31 전날 복구 마무리가 추세 판정을 넣음
+        pos = P.normalize(pos)
         pos["held"]["084670"].update(trend_sell_next_open=True, judged_on="2026-10-23", judged_by="공식 일봉 (다음 날 복구)")
+        res.mark_trend(pos, "084670", "2026-10-23", "공식 일봉 (다음 날 복구)")    # 복구 마무리와 같게 (11J 보완 3: 매도 의무 + 목록)
         P.save(self.R.POSITIONS, pos)
         for hms in ("08:31:00", "08:31:30", "08:32:00", "08:33:00"):
             self.clk.at(hms)

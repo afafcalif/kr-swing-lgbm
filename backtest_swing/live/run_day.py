@@ -52,10 +52,24 @@ def top_list(top, price_col):
     return [{"code": r.code, "score": float(r.score), price_col: float(getattr(r, "raw_close"))} for r in top.itertuples()]
 
 
-def snap_anomalies(snap, raw=None):
+def snap_anomalies(snap, raw=None, day=None):
     """확인 리뷰 27: 응답에는 있는데 계산 입력에서 빼는 데이터 이상. 반환 {code: 이유}.
     거래량 0(거래정지 포함)은 백테스트에서도 대상이 아니므로 이상이 아니다. 이상 = 거래량 > 0 인데 시가·고가·저가·현재가 중 0 이나 결측,
-    또는 가격이 그날 상·하한가(응답의 upl_pric·lst_pric) 밖. raw(응답 원문, stk_cd·upl_pric·lst_pric)가 없으면 범위 확인은 안 함"""
+    또는 가격이 그날 상·하한가(응답의 upl_pric·lst_pric) 밖. raw(응답 원문, stk_cd·upl_pric·lst_pric)가 없으면 범위 확인은 안 함.
+    11K 4: day 를 주면 오늘 것이 아닌 시세도 이상 = 거래량 > 0 인데 시세 날짜(dt) != day 이거나 체결 시각(cntr_tm) 없음·000000"""
+    if day is not None and "dt" in snap and "cntr_tm" in snap:
+        ds = pd.Timestamp(day).strftime("%Y%m%d")
+        old = {}
+        for r in snap.itertuples():
+            if not (r.volume > 0):
+                continue
+            dt, tm = str(r.dt or "")[:8], str(r.cntr_tm or "")
+            if dt != ds:
+                old[r.code] = f"시세 날짜 {dt or '없음'} != {ds} (오늘 것 아님)"
+            elif tm.strip("0") == "" or tm in ("nan", "None"):
+                old[r.code] = f"거래량 > 0 인데 체결 시각 {tm or '없음'} (오늘 것인지 모름)"
+        rest = snap[~snap.code.isin(list(old))]
+        return {**old, **snap_anomalies(rest, raw)}
     from orders import code_of, num
     lim = {}
     if raw is not None and "stk_cd" in raw and "upl_pric" in raw and "lst_pric" in raw:
@@ -74,9 +88,9 @@ def snap_anomalies(snap, raw=None):
     return out
 
 
-def snap_rows(snap, raw=None):
-    """계산 입력: 거래량 > 0 이고 데이터 이상(snap_anomalies)이 아닌 종목"""
-    bad = snap_anomalies(snap, raw)
+def snap_rows(snap, raw=None, day=None):
+    """계산 입력: 거래량 > 0 이고 데이터 이상(snap_anomalies, day 를 주면 오늘 것이 아닌 시세 포함)이 아닌 종목"""
+    bad = snap_anomalies(snap, raw, day)
     return {r.code: ({"open": r.open, "high": r.high, "low": r.low, "close": r.close, "volume": r.volume, "amount": r.amount}, None, None)
             for r in snap.itertuples() if r.volume > 0 and r.close > 0 and r.open > 0 and r.code not in bad}
 
@@ -155,7 +169,7 @@ def shadow():
         pool.close()
         print(f"snapshot check failed: {vinfo}", flush=True)
         return
-    rows = snap_rows(snap, raw)
+    rows = snap_rows(snap, raw, day)
     res = E.run_day(pool, day, rows, index, idx_vals, b, cols, ledgers)
     fok = res["filter"]["filter_ok"]
     order_ledger = "strategy" if fok else "full"
@@ -240,16 +254,19 @@ def shadow():
                           "close": [t["code"] for t in log["close_1530"]["ledgers"][n]["top3"]]} for n in NAMES}, ensure_ascii=False), flush=True)
 
 
-def rerun(date, suffix=""):
-    """8장 12 (1): 장부를 새로 계산하지 않고 실행 엔진과 같은 장부 상태(ledger_before, 그날 기준 열린 거래는 열린 그대로)를 넣는다"""
+def rerun(date, suffix="", out=""):
+    """8장 12 (1): 장부를 새로 계산하지 않고 실행 엔진과 같은 장부 상태(ledger_before, 그날 기준 열린 거래는 열린 그대로)를 넣는다.
+    out 을 주면 그날 로그는 고치지 않고 결과({"rerun", "errors_add"})만 out 파일에 쓴다 (상주 프로그램이 1분봉을 받는 동안 함께 돌릴 때, 11I)"""
     day = pd.Timestamp(date)
+    import common as C
+    C.apply_universe(day)  # 11K 1: 그날 쓴 대상 종목 목록으로
     path = os.path.join(LOG_DIR, f"{day.date()}{suffix}.json")
     log = json.load(open(path, encoding="utf-8"))
     from daily import index_series
     b, cols, meta, chk = M.load(day.strftime("%Y-%m"))
     full = pd.read_parquet(log["live"]["snapshot"]["file"])
     snap = pd.DataFrame({c[2:]: full[c] for c in full.columns if c.startswith("p_")})
-    rows = snap_rows(snap, full)
+    rows = snap_rows(snap, full, day)
     # 동결 load_stock·market_features 를 그대로 부른다 (임시 폴더 파일, 폴더·경로 상수만 바꿈). 실시간은 메모리 사본 (EXEC_SPEC 0장 예외)
     pool = E.ShardPool(sd.universe_codes(), n=12, use_append=True, frozen=True)
     try:
@@ -269,6 +286,7 @@ def rerun(date, suffix=""):
     log["rerun"] = {"eligible_n": len(res["eligible"]), "model_check": chk["ok"], "run": now().strftime("%H:%M:%S"),
                     "score_all": score_all, "factor_default_n": res.get("factor_default_n"), "vscale_default_n": res.get("vscale_default_n"),
                     "method": "동결 stage3_data.load_stock·stage4_features.market_features 를 그대로 호출 (임시 파일), 장부 상태 = 실행 엔진과 같음"}
+    errs = []
     for n in NAMES:
         top = res["ledgers"][n]["top3"]
         re3 = list(top.code)
@@ -277,7 +295,11 @@ def rerun(date, suffix=""):
         log["rerun"][n] = {"top3": re3, "same_3of3": re3 == [t["code"] for t in live], "overlap": len(set(re3) & set(lv)),
                            "score_max_abs_diff": float(max(abs(float(s) - lv.get(c, np.nan)) for c, s in zip(top.code, top.score))) if re3 else None}
         if not log["rerun"][n]["same_3of3"]:
-            log["errors"].append(f"8장 12 (1) 코드 일치 실패 ({n} 장부): 원인을 찾을 때까지 신규 매수 중단")
+            errs.append(f"8장 12 (1) 코드 일치 실패 ({n} 장부): 원인을 찾을 때까지 신규 매수 중단")
+    if out:
+        jdump(out, {"rerun": log["rerun"], "errors_add": errs})
+        return
+    log["errors"] += errs
     jdump(path, log)
 
 

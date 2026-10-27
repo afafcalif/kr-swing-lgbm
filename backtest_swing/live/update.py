@@ -74,7 +74,8 @@ def allowed(t=None):
     """거래일 08:00 ~ 15:45 에는 갱신하지 않는다 (휴장일·주말·장 마감 후만)"""
     t = t or now_kst()
     hms = t.strftime("%H:%M:%S")
-    return not (S.is_trading_day(t) and BLOCK_FROM <= hms < BLOCK_UNTIL)
+    h = S.day_hours(t)  # 11K 2: 거래시간 변경일(수능일 폐장 16:30 등)은 막는 시간도 함께 밂
+    return not (S.is_trading_day(t) and S.shift_hms(BLOCK_FROM, h) <= hms < S.shift_hms(BLOCK_UNTIL, h))
 
 
 def frozen_status():
@@ -276,6 +277,7 @@ def _hold_stopped():
 
 
 if __name__ == "__main__":
+    settings.refuse_test_env("코드 갱신 (update.py)")
     ap = argparse.ArgumentParser()
     ap.add_argument("--remote", default=os.environ.get("UPDATE_REMOTE") or "origin")
     ap.add_argument("--branch", default=os.environ.get("UPDATE_BRANCH") or "main")

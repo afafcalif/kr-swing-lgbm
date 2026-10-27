@@ -189,5 +189,6 @@ def stop(timeout=STOP_TIMEOUT):
 
 
 if __name__ == "__main__":
+    settings.refuse_test_env("켜기·끄기 (control.py)")
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
     sys.exit({"start": start, "stop": stop, "status": status}[cmd]())

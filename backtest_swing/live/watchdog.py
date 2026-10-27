@@ -5,9 +5,12 @@
 
 - 상주 프로그램이 살아 있는지 OS 수준 단일 실행 잠금(logs/exec/resident.lock)으로 확인하고, 아니면 다시 켠다 (2026-10-24 F-02) (텔레그램 "재시작" 은 상주 프로그램이 켜지면서 보냄).
 - 하트비트(heartbeat_file 마지막 줄)가 heartbeat_stale_minutes(5분) 이상 끊기면 텔레그램 알림 (끊긴 동안 한 번만, 다시 이어지면 해제).
+- 하트비트는 상주 프로그램의 별도 스레드가 찍으므로(11I), 줄 끝의 loop=초(주 반복이 마지막으로 돈 뒤 지난 시간)가 같은 5분을 넘으면
+  "[주 반복 멈춤]" 알림을 따로 보낸다 (멈춘 동안 한 번만).
 - 감시 기록: log_dir/watchdog.log
 """
 import os
+import re
 import subprocess
 import sys
 
@@ -20,6 +23,7 @@ import notify as N  # noqa: E402
 CFG = settings.load()
 LOG = os.path.join(CFG["log_dir"], "watchdog.log")
 FLAG = os.path.join(CFG["state_dir"], "heartbeat_alerted.flag")
+LOOP_FLAG = os.path.join(CFG["state_dir"], "loop_stall_alerted.flag")
 RESIDENT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "resident.py")
 
 
@@ -37,15 +41,27 @@ def alive(pid):
     return f'"{pid}"' in r.stdout and "python" in r.stdout.lower()
 
 
-def last_heartbeat():
+def last_line():
     try:
         with open(CFG["heartbeat_file"], "rb") as f:
             f.seek(0, 2)
             f.seek(max(0, f.tell() - 300))
-            line = f.read().decode("utf-8", "ignore").strip().splitlines()[-1]
-        return pd.Timestamp(line[:19])
+            return f.read().decode("utf-8", "ignore").strip().splitlines()[-1]
     except Exception:  # noqa: BLE001
         return None
+
+
+def last_heartbeat():
+    try:
+        return pd.Timestamp(last_line()[:19])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def loop_age():
+    """마지막 하트비트 줄의 loop=초 (주 반복이 마지막으로 돈 뒤 지난 시간). 예전 형식이면 None"""
+    m = re.search(r" loop=(\d+)s", last_line() or "")
+    return int(m.group(1)) if m else None
 
 
 def start():
@@ -86,6 +102,15 @@ def main():
         log(f"heartbeat stale {stale_min:.1f} min, pid {pid} alive")
     elif os.path.exists(FLAG) and stale_min is not None and stale_min < CFG["heartbeat_stale_minutes"]:
         os.remove(FLAG)
+    age = loop_age()
+    if ok and age is not None and age >= CFG["heartbeat_stale_minutes"] * 60:  # 11I: 하트비트 스레드는 도는데 주 반복이 멈춤
+        if not os.path.exists(LOOP_FLAG):
+            N.send(f"[주 반복 멈춤] 하트비트는 이어지지만 주 반복이 {age // 60}분째 안 돎 (단계 {(last_line() or '').split('step=')[-1][:40]}), pid {pid}",
+                   log_path=os.path.join(CFG["log_dir"], "alerts.log"))
+            open(LOOP_FLAG, "w").write(str(age))
+        log(f"main loop stalled {age}s, pid {pid}")
+    elif os.path.exists(LOOP_FLAG) and age is not None and age < CFG["heartbeat_stale_minutes"] * 60:
+        os.remove(LOOP_FLAG)
     if not ok:
         new = start()
         N.send(f"[감시] 상주 프로그램이 없어 다시 켬 (이전 pid {pid}, 새 pid {new}, 마지막 하트비트 {hb})",
@@ -96,4 +121,5 @@ def main():
 
 
 if __name__ == "__main__":
+    settings.refuse_test_env("감시 작업 (watchdog.py)")
     main()
