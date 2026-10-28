@@ -37,7 +37,8 @@ ALLOW = [
     # 시험 (가짜 서버·가짜 시계)
     *(LIVE + f for f in (
         "test_broad1.py", "test_broad2.py", "test_broad3.py", "test_broad4.py", "test_broad5.py",
-        "test_broad6.py", "test_broad7.py", "test_broad8.py", "test_broad9.py",
+        "test_broad6.py", "test_broad7.py", "test_broad8.py", "test_broad9.py", "test_broad10.py",
+        "test_broad11.py", "test_broad12.py",
         "test_codex.py", "test_confirm.py", "test_fix.py", "test_mock1.py", "test_orders.py", "test_safety.py",
         "test_second.py", "test_third.py",
     )),
@@ -89,7 +90,16 @@ REWRITE = [
     (LIVE + "SETUP.md", "git@github.com:afafcalif/stock.git", "git@github.com:<계정>/<저장소>.git"),
     (LIVE + "SETUP.md", "https://github.com/afafcalif/stock.git", "https://github.com/<계정>/<저장소>.git"),
     ("backtest_swing/EXEC_SPEC.md", "3,000만 원 (모의투자 계좌 예수금 30,000,000원)", "3,000만 원 (모의투자 시작 예수금)"),
+    # 모의 주문 로그 인용의 종목 코드 (보유 종목이 드러나지 않게)
+    ("backtest_swing/EXEC_SPEC.md", re.compile(r"15:21:01 \d{6} 전송 -> 15:21:02 \d{6} 전송"),
+     "15:21:01 첫 매수 전송 -> 15:21:02 둘째 매수 전송"),
 ]
+# 실제 모의 주문 종목 코드: 원본 문서의 로그 인용에서 읽어(이 파일에는 적지 않음) 복사본 전체에서 가짜 코드로 바꾼다.
+# (경로, 코드를 잡는 정규식). 못 찾으면 실패. REWRITE 보다 먼저 읽는다.
+MASK_CODES = [
+    ("backtest_swing/EXEC_SPEC.md", re.compile(r"15:21:0[12] (\d{6}) 전송")),
+]
+MASK_BASE = 990001  # 가짜 코드 990001, 990002, ...
 # 원본 저장소 폴더(--src 경로, DRIVE_REPO)를 PUB_ROOT 로 바꿔야 하는 파일. 바뀐 곳이 없으면 실패.
 PATH_REWRITE = [LIVE + "config.example.json", LIVE + "register_tasks.ps1", LIVE + "verify_bundle.ps1",
                 LIVE + "make_bundle.py", LIVE + "SETUP.md", LIVE + "test_broad8.py"]
@@ -261,8 +271,18 @@ def report(title: str, hits) -> None:
         print(f"  {where} [{rule}]")
 
 
+def mask_codes(stage: Path) -> tuple[dict[str, str], list[str]]:
+    errs, codes = [], []
+    for p, rx in MASK_CODES:
+        found = rx.findall((stage / p).read_bytes().decode("utf-8"))
+        if not found:
+            errs.append(f"{p}: 가릴 종목 코드가 원본에 없음 (MASK_CODES 항목 확인)")
+        codes += [c for c in found if c not in codes]
+    return {c: str(MASK_BASE + i) for i, c in enumerate(codes)}, errs
+
+
 def apply_rewrites(stage: Path, src: Path) -> list[str]:
-    errs = []
+    masks, errs = mask_codes(stage)
     for p, old, new in REWRITE:
         f = stage / p
         t = f.read_bytes().decode("utf-8")
@@ -287,6 +307,13 @@ def apply_rewrites(stage: Path, src: Path) -> list[str]:
         if not n:
             errs.append(f"{p}: 바꿀 경로가 원본에 없음 (PATH_REWRITE 항목 확인)")
         f.write_bytes(t.encode("utf-8"))
+    if masks:
+        rx = re.compile(r"(?<!\d)(" + "|".join(masks) + r")(?!\d)")
+        for p in ALLOW:
+            f = stage / p
+            if f.suffix.lower() in TEXT_EXT:
+                t = f.read_bytes().decode("utf-8")
+                f.write_bytes(rx.sub(lambda m: masks[m.group(1)], t).encode("utf-8"))
     return errs
 
 

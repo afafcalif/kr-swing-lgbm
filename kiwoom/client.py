@@ -48,6 +48,9 @@ class KiwoomRestClient:
         
         # Rate Limiter 추가 (Mock Server 안정성을 위해 1회/초로 보수적 설정)
         self.rate_limiter = RateLimiter(limits_per_sec=1)
+        # send_gate(tr_code, max_wait) -> True/False: 있으면 rate_limiter 대신 이것 하나로 기다린다 (실행 코드의 프로세스 공용 제한기, 11L 보완).
+        # 토큰 준비 뒤 HTTP 전송 바로 앞에서 불러, 기다린 뒤의 실제 전송 시각이 간격 기준이 된다
+        self.send_gate = None
 
     def request(
         self,
@@ -67,18 +70,21 @@ class KiwoomRestClient:
         # (주문 TR: 재시도는 호출하는 쪽이 마감 시각을 확인하며 한다, 2026-10-24 Codex 확인 리뷰 26)
         max_retries = 3
         for attempt in range(max_retries + 1):
-            # 요청 전 대기
-            if max_wait is None:
-                self.rate_limiter.wait()
-            elif self.rate_limiter.wait(max_wait=max_wait) is False:
-                raise NotSent(f"유량 대기 상한 {max_wait}초 초과 (api-id={tr_code}) - 보내지 않음")
-            
             try:  # 손절 감시 안 토큰 발급도 같은 제한. 만료 전 기존 토큰은 발급 실패에도 씀, 그 밖의 발급 실패 = 보내지 않음 (AuthError)
                 token = self.auth.get_token(**({"timeout": timeout} if timeout is not None else {}))
             except AuthError:
                 raise
             except Exception as e:  # noqa: BLE001
                 raise AuthError(f"토큰 발급 실패 - 보내지 않음 (api-id={tr_code}): {e!r}"[:300]) from e
+            # 요청 전 대기: 토큰 준비 뒤, 전송 바로 앞 (기다린 뒤 바로 보냄 = 실제 전송 간격). 대기 장치는 하나 (send_gate 가 있으면 그것만)
+            gate = getattr(self, "send_gate", None)
+            if gate is not None:
+                if not gate(tr_code, max_wait):
+                    raise NotSent(f"유량 대기 상한 {max_wait}초 초과 (api-id={tr_code}) - 보내지 않음")
+            elif max_wait is None:
+                self.rate_limiter.wait()
+            elif self.rate_limiter.wait(max_wait=max_wait) is False:
+                raise NotSent(f"유량 대기 상한 {max_wait}초 초과 (api-id={tr_code}) - 보내지 않음")
             # before_send: 유량 대기·토큰 뒤 보내기 바로 앞 확인 (주문 TR 마감 시각, 2026-10-24 Codex 2차 확인 리뷰 4), False 면 NotSent
             if before_send is not None and not before_send():
                 raise NotSent(f"전송 직전 확인 실패: 마감 시각 지남 (api-id={tr_code}) - 보내지 않음")

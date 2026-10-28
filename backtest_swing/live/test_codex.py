@@ -73,6 +73,7 @@ class Base(unittest.TestCase):
 
     def tearDown(self):
         import run_day as RD
+        C.RateGate.configure({})                                                   # 11L: run() 이 켠 공용 호출 제한기를 다음 시험에 남기지 않음
         RD.SUMMARY = self._saved_summary
         R = self.R
         (cfg, R.POSITIONS, R.BLOCK, R.APPROVED, R.LEDGER, R.LOG_DIR, R.SNAP_DIR, R.alert, R.Caller,

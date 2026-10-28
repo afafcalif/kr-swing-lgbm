@@ -210,8 +210,8 @@ class Confirm(Base):
         finally:
             KC.time.sleep = saved
         self.assertEqual((Sess.calls, slept), (["kt10000"], []))               # 클라이언트 대기 없음, 15:28 넘은 재시도 없음
-        self.assertEqual([(i["status"], i["return_code"]) for i in om.records], [(O.REJECTED, -429)])
-        self.assertEqual(self.clk.slept, [1.0])
+        self.assertEqual([(i["status"], i["return_code"]) for i in om.records], [(O.NOT_SENT, -429)])   # 11L: 유량 초과 = 보내지 않음
+        self.assertEqual(self.clk.slept, [])                                      # 다시 보낼 시각이 매수 마감(15:27:59) 뒤라 기다리지 않음
 
     # ---------------------------------------------------------------- N3
     def test_N3_trend_sell_after_0831_recovery(self):

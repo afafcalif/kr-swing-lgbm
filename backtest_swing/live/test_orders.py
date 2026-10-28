@@ -73,6 +73,8 @@ class FakeKiwoom:
         self.auto_fill = {}
         self.pages = []               # (tr, cont_yn, next_key)
         self.rate_wait = 0.0          # 주문 TR 유량 대기 (초): 가짜 시계를 그만큼 보냄
+        self.min_gap = {}             # 11L: TR 별 최소 간격 (초, 가짜 시계). 어기면 키움처럼 HTTP 429 (클라이언트 재시도 끔 = None)
+        self.last_tr, self.r429 = {}, []
 
     def _row(self, code):
         for r in self.balance_rows:
@@ -151,6 +153,13 @@ class FakeKiwoom:
                 self.clock.t += pd.Timedelta(seconds=self.rate_wait)
             if bs is not None and not bs():
                 raise NotSent(f"전송 직전 확인 실패: 마감 시각 지남 (api-id={tr_code}) - 보내지 않음")
+        gap = self.min_gap.get(tr_code)
+        if gap is not None:
+            now, last = self.clock(), self.last_tr.get(tr_code)
+            if last is not None and (now - last).total_seconds() < gap:
+                self.r429.append((now.strftime("%H:%M:%S.%f")[:-3], tr_code))
+                return None                                                       # HTTP 429 (받아들여지지 않음, 상태 그대로)
+            self.last_tr[tr_code] = now
         self.calls.append((self.clock().strftime("%H:%M:%S.%f")[:-3], tr_code, dict(json or {})))
         ract = "ok"
         if tr_code in O.READ_TRS:
@@ -319,7 +328,7 @@ class T(unittest.TestCase):
         self.assertEqual(r2["status"], O.UNKNOWN)
         self.assertEqual(len(sends(fk2)), 1)
 
-    def test_429_exhausted_is_reject_with_cause(self):
+    def test_429_is_rate_not_sent_not_counted(self):
         clk = FakeClock("2026-10-23 15:21:05")
 
         class C:
@@ -327,8 +336,11 @@ class T(unittest.TestCase):
                 return None
         om = O.OrderManager(O.Broker(C(), allow_orders=True), clock=clk, sleep=clk.sleep)
         r = om.place_buys(PLAN, "본래")[0]
-        self.assertEqual(r["status"], O.REJECTED)
-        self.assertEqual(r["cause"], "429")
+        self.assertEqual((r["status"], r["not_sent_kind"], r["return_code"]), (O.NOT_SENT, "rate", -429))   # 11L: 유량 초과 = 보내지 않음 (거부 아님)
+        self.assertIn("429", r["cause"])
+        self.assertEqual(len(om.records), 1 + O.RATE_RETRIES)                   # 간격(최소 1초) 두고 다시 3번
+        self.assertEqual(om.store.rejected_count(om.date(), PLAN[0]["code"], "buy"), 0)   # 거부 횟수에 안 셈 -> 다음 분 다시 보낼 수 있음
+        self.assertEqual(om.resendable("buy"), [PLAN[0]["code"]])
 
     def test_no_response_accepted_found_by_query_no_resend(self):
         clk, fk, om, notes = setup()
@@ -367,7 +379,8 @@ class T(unittest.TestCase):
         self.assertEqual(r["status"], O.UNKNOWN)
 
     def test_time_window(self):
-        for t, sent in (("2026-10-23 15:20:59", 0), ("2026-10-23 15:25:30", 0), ("2026-10-23 15:28:00", 0), ("2026-10-23 15:24:59", 1)):
+        for t, sent in (("2026-10-23 15:20:59", 0), ("2026-10-23 15:25:30", 1), ("2026-10-23 15:27:59", 1), ("2026-10-23 15:28:00", 0),
+                        ("2026-10-23 15:24:59", 1)):                                # 11L 보완 2: 매수 전송은 15:21 ~ 15:28 전 하나
             clk, fk, om, _ = setup(t)
             om.place_buys(PLAN, "본래")
             self.assertEqual(len(sends(fk)), sent, t)

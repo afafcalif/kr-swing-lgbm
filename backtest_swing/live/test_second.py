@@ -143,7 +143,7 @@ class SendDeadline(unittest.TestCase):
         om.place_buys(PLAN, "본래")
         self.assertEqual(len(sends(fk)), 0)
         self.assertTrue(all(i["status"] == O.NOT_SENT and "유량" in i["cause"] for i in om.records))
-        self.assertEqual(len(om.records), 6)                                     # 1초 간격 다시 5번 (거부 횟수에는 안 셈)
+        self.assertEqual(len(om.records), 1 + O.RATE_RETRIES)                    # 11L: 간격 두고 다시 3번 (거부 횟수에는 안 셈)
         fk.rate_wait = 0.5
         om2 = O.OrderManager(O.Broker(fk, allow_orders=True), clock=clk, sleep=clk.sleep)
         om2.place_buys(PLAN, "본래")

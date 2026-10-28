@@ -8,6 +8,7 @@ import math
 import os
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter
 
@@ -322,6 +323,103 @@ def floor_tick(p: float) -> int:
     return int(math.floor(round(p / t, 9)) * t)
 
 
+ORDER_TRS_ALL = {"kt10000", "kt10001", "kt10003"}
+
+
+class RateGate:
+    """11L: 프로세스 전체 공용 키움 호출 제한기 (TR 별 최소 간격, 토큰(서버) 단위). 모든 Caller·Broker 호출이 지난다 (스레드 안전).
+    limits = {"mock": {"same_tr": 1.2}, "prod": {"order": 0.25, "query": 0.25, "kt00018": 0.5}} (설정 rate_limits, 상주 프로그램이 run 에서 켬).
+      mock: 같은 TR 사이 same_tr 초 (키움 모의: TR 1개당 초당 1회, 주문·조회 모두)
+      prod: 주문 TR 끼리 order 초, 조회 TR 끼리 query 초 (키움 실전: 주문·조회 각각 초당 5회 -> 4회), kt00018 끼리 따로 (초당 2회)
+    예약 방식: 잠금 안에서 다음 빈 시각을 예약하고 잠금 밖에서 그때까지 잠 (긴 대기가 다른 TR 을 막지 않음, 먼저 온 순서). 꺼져 있으면(limits 비어 있음) 대기 0"""
+
+    lock = threading.Lock()
+    klocks = {}  # 제한 키 -> 잠금 (같은 키 직렬화)
+    last = {}
+    limits = {}
+    clock, sleep = staticmethod(time.time), staticmethod(time.sleep)
+    waited = Counter()
+
+    @classmethod
+    def configure(cls, limits, clock=None, sleep=None):
+        cls.limits = {k: dict(v) for k, v in (limits or {}).items() if not k.startswith("_") and isinstance(v, dict)}
+        if clock is not None:
+            cls.clock = staticmethod(clock)
+        if sleep is not None:
+            cls.sleep = staticmethod(sleep)
+        cls.last = {}
+
+    @classmethod
+    def rules(cls, env, tr):
+        """이 호출이 지켜야 할 (키, 간격) 목록"""
+        lim = cls.limits.get(env) or {}
+        out = []
+        if "same_tr" in lim:
+            out.append(((env, tr), float(lim["same_tr"])))
+        cat = "order" if tr in ORDER_TRS_ALL else "query"
+        if cat in lim:
+            out.append(((env, cat), float(lim[cat])))
+        if tr in lim:
+            out.append(((env, tr, "tr"), float(lim[tr])))
+        return out
+
+    @classmethod
+    def interval(cls, env, tr):
+        return max([iv for _, iv in cls.rules(env, tr)] or [0.0])
+
+    @classmethod
+    def wait(cls, env, tr, max_wait=None):
+        """다음 빈 시각까지 기다림. 반환: 기다린 초, max_wait 안에 통과할 수 없으면 None (호출한 쪽이 보내지 않음·조회 실패로).
+        11L 보완 2 (1): 같은 제한 키는 잠금으로 직렬화 — 키 잠금을 잡은 채로 기다리고, 깬 뒤 마지막 실제 통과 시각을 다시 확인한 다음
+        이번 실제 통과 시각을 남기고 푼다 (먼저 잠든 호출이 늦게 깨도 다음 호출이 그 실제 시각부터 간격을 잼). 다른 키는 막지 않음.
+        여러 키를 잡을 때는 정렬한 순서로 (교착 없음). 잠금 대기도 max_wait 안 (실제 시간)"""
+        rs = cls.rules(env, tr)
+        if not rs:
+            return 0.0
+        keys = sorted({k for k, _ in rs})
+        with cls.lock:
+            locks = [cls.klocks.setdefault(k, threading.Lock()) for k in keys]
+        t_real, got, waited = time.monotonic(), [], 0.0
+        try:
+            for lk in locks:
+                if max_wait is None:
+                    lk.acquire()
+                else:
+                    left = max_wait - (time.monotonic() - t_real)
+                    if left < 0 or not lk.acquire(timeout=max(left, 0.0)):
+                        return None
+                got.append(lk)
+            while True:
+                now = cls.clock()
+                need = max([0.0] + [cls.last.get(k, -1e18) + iv - now for k, iv in rs])
+                if need <= 0:
+                    break
+                if max_wait is not None and waited + need > max_wait:
+                    return None
+                cls.waited[tr] += 1
+                cls.sleep(need)
+                waited += need
+            with cls.lock:
+                for k, _ in rs:
+                    cls.last[k] = now  # 이번 실제 통과 시각 (곧바로 전송)
+            return waited
+        finally:
+            for lk in reversed(got):
+                lk.release()
+
+    @classmethod
+    def client_gate(cls, env, limiter=None):
+        """kiwoom 클라이언트의 send_gate (토큰 준비 뒤 HTTP 전송 바로 앞에서 불림). 공용 제한기에 이 TR 규칙이 있으면 그것만,
+        없으면(꺼져 있음: 시험·도구) 클라이언트 자기 제한기 (대기 장치는 늘 하나). 반환 True = 보냄, False = 대기 상한 넘음"""
+        def gate(tr, max_wait=None):
+            if cls.rules(env, tr):
+                return cls.wait(env, tr, max_wait=max_wait) is not None
+            if limiter is None:
+                return True
+            return limiter.wait(max_wait=max_wait) is not False if max_wait is not None else (limiter.wait() or True)
+        return gate
+
+
 class Caller:
     """시세 조회 TR 만. rps 이하로 호출, 유량 초과(HTTP 429 / return_code 5)면 백오프, 연속 5번이면 중단 (EXEC_SPEC 1A)."""
 
@@ -332,6 +430,7 @@ class Caller:
         from kiwoom.config import Settings
         self.c = KiwoomRestClient(Settings.from_env(env))
         self.c.rate_limiter = RateLimiter(limits_per_sec=rps)
+        self.c.send_gate = RateGate.client_gate(env, self.c.rate_limiter)  # 11L 보완: 공용 제한기를 전송 바로 앞에서 (대기 장치 하나)
         self.env, self.rps = env, rps
         self.n, self.errors, self.hourly, self.fail_streak, self.stopped = 0, [], Counter(), 0, None
 
@@ -344,6 +443,10 @@ class Caller:
                 if deadline is not None and time.time() + backoff > deadline:
                     raise ValueError(f"시간 상한: {tr} 유량 초과 백오프 {backoff}초가 상한을 넘음")
                 time.sleep(backoff)
+            # 11L: 프로세스 전체 공용 제한기 (Caller 를 여러 개 만들어도 같은 토큰의 조회 TR 을 합쳐서 제한). 손절 감시의 대기 상한도 지킴
+            mw0 = None if deadline is None else max(0.0, deadline - time.time())
+            if getattr(self.c, "send_gate", None) is None and RateGate.wait(getattr(self, "env", "prod"), tr, max_wait=mw0) is None:
+                raise ValueError(f"시간 상한: {tr} 공용 유량 제한기 대기가 상한을 넘음")  # send_gate 없는 클라이언트(시험용)만 여기서
             self.n += 1
             self.hourly[pd.Timestamp.now().strftime("%Y-%m-%d %H")] += 1
             try:

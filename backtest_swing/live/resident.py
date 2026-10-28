@@ -371,7 +371,7 @@ class Resident:
         c = KiwoomRestClient(st)
         c.rate_limiter = RateLimiter(limits_per_sec=1 if env == "mock" else 5)
         allow = bool(CFG["orders_enabled"]) and (env == "mock" or bool(CFG["allow_prod_orders"]))
-        return O.Broker(c, allow_orders=allow)
+        return O.Broker(c, allow_orders=allow, env=env)  # 11L: env = 공용 호출 제한기의 토큰 키
 
     def new_om(self, d):
         store = O.IntentStore(os.path.join(CFG["state_dir"], "intents", f"{d.date.date()}.json"), clock=self.now)
@@ -483,7 +483,7 @@ class Resident:
             if not d.s.get("special_hours_alerted"):
                 d.set("special_hours_alerted", self.now().strftime("%H:%M:%S"))
                 alert(f"[거래시간 변경일] {d.date.date()} {h['reason']}: 개장 {h['open']} 폐장 {h['close']} -> 모든 시각을 함께 밂 "
-                      f"(손절 감시 {T['stop_from']} ~ {T['stop_until']}, 스냅샷 {T['snapshot']}, 매수 {T['buy_from']} ~ {T['buy_until']}, "
+                      f"(손절 감시 {T['stop_from']} ~ {T['stop_until']}, 스냅샷 {T['snapshot']}, 매수 {T['buy_from']} ~ {T['no_new_order_after']} 전, "
                       f"정산 {T['settle']}, 하루 끝 {T['day_end']})" + ("" if h.get("confirmed") else " — KRX 공지로 확인 필요 (krx_special_hours.json)"))
         rlog(f"하루 시작(핵심): {d.date.date()} ({reason})", "INFO")
         self.broker = self.new_broker()
@@ -1541,10 +1541,24 @@ class Resident:
             acct = self.broker.account()
             orderable = acct["orderable"]
             pre_qty = {c: int(h["qty"]) for c, h in acct["holdings"].items()}
-        except Exception as e:  # noqa: BLE001  (Codex 2: 조회 실패·필드 없음·NaN 이면 매수 안 함)
+        except O.FieldError as e:  # Codex 2: 필드 없음·NaN = 응답 형식 이상 -> 그날 매수 안 함 (그대로)
             self.block_buys("buy_deposit_fail", f"매수 전 주문가능금액 조회 실패 -> 그날 신규 매수 안 함: {e!r}", f"[매수 전 예수금 조회 실패] 오늘 매수 안 함: {e!r}")
             self.record_buy_decision(False, f"주문가능금액 조회 실패: {e!r}"[:200])
             return {"sent": 0, "reason": "주문가능금액 조회 실패"}
+        except Exception as e:  # noqa: BLE001  (11L 보완 3: 유량 오류·네트워크 = 일시 실패 -> 15:25 까지 매 분 다시, 영구 차단 아님)
+            r = dict(d.s.get("buy_account_retry") or {})
+            first = not r
+            r.update(pending=True, since=r.get("since") or self.now().strftime("%H:%M:%S"), tries=int(r.get("tries", 0)) + 1,
+                     minute=self.now().strftime("%H:%M"), last_error=repr(e)[:200])
+            d.set("buy_account_retry", r)
+            self.record_buy_decision(False, f"매수 전 주문가능금액 조회 실패 (일시) -> {T['no_new_order_after'][:5]} 전까지 매 분 다시: {e!r}"[:200])
+            if first:
+                alert(f"[매수 전 계좌 조회 실패] {e!r} — {T['no_new_order_after'][:5]} 전까지 매 분 다시 조회해 성공하면 매수"[:300])
+            return {"sent": 0, "reason": "주문가능금액 조회 실패 (일시, 다시)", "retry": True}
+        if (d.s.get("buy_account_retry") or {}).get("pending"):
+            with d.lock:
+                d.s["buy_account_retry"].update(pending=False, resolved=self.now().strftime("%H:%M:%S"))
+                d.save()
         recs = self.om.place_buys(d.s["live"]["plan"], d.s["live"]["kind"], orderable=orderable, pre_qty=pre_qty)
         sent = sum(1 for r in recs if r.get("intent_id") and r.get("status") != O.NOT_SENT)
         self.record_buy_decision(True, "", {"sent": sent, "orderable": orderable})
@@ -2600,11 +2614,18 @@ class Resident:
                 and T["measure_snapshot"] <= hms < T["no_new_order_after"] and d.done("snapshot") and not d.done("measure_snapshot"):
             step = "measure_snapshot"
             S.run_step(d, "measure_snapshot", self.measure_snapshot, notify=alert)
-        if T["buy_from"] <= hms <= T["buy_until"] and not d.done("buy"):
+        if T["buy_from"] <= hms < T["no_new_order_after"] and not d.done("buy"):  # 11L 보완 2: 매수 마감 하나 = 15:28 전
             step = "buy"
             S.run_step(d, "buy", self.buy, self.om, alert)
-        elif T["buy_from"] <= hms <= T["buy_until"] and self.last_buy_minute != t.strftime("%H:%M"):  # N2: 매 분 보내지 못한 매수 다시
+        elif T["buy_from"] <= hms < T["no_new_order_after"] and self.last_buy_minute != t.strftime("%H:%M"):  # N2: 매 분 보내지 못한 매수 다시
             self.last_buy_minute = t.strftime("%H:%M")
+            ar = d.s.get("buy_account_retry") or {}
+            if ar.get("pending") and ar.get("minute") != t.strftime("%H:%M"):  # 11L 보완 3: 매수 전 계좌 조회 일시 실패 -> 매 분 다시 (성공하면 매수)
+                step = "buy_retry"
+                try:
+                    self.buy()
+                except Exception as e:  # noqa: BLE001  (다음 분에 다시)
+                    d.err(f"매수 다시 (계좌 조회 실패 뒤) 오류: {e!r}"[:300])
             codes = self.om.resendable("buy")
             if codes:
                 step = "buy_more"
@@ -2612,6 +2633,13 @@ class Resident:
                     self.buy_resend(codes)
                 except Exception as e:  # noqa: BLE001  (다음 분에 다시)
                     d.err(f"매수 다시 보내기 오류 (다음 분에 다시): {e!r}"[:300])
+        if hms >= T["no_new_order_after"] and (d.s.get("buy_account_retry") or {}).get("pending"):  # 15:28 전까지 계좌 조회가 끝내 실패
+            with d.lock:
+                d.s["buy_account_retry"].update(pending=False, expired=hms)
+                d.save()
+            self.block_buys("buy_deposit_fail", f"매수 전 주문가능금액 조회가 {T['no_new_order_after'][:5]} 전까지 실패 -> 그날 신규 매수 안 함 (11L 보완 3)",
+                            f"[매수 전 예수금 조회 실패] {T['no_new_order_after'][:5]} 전까지 다시 조회했지만 실패 -> 오늘 매수 안 함")
+            self.record_buy_decision(False, f"주문가능금액 조회 실패 ({T['no_new_order_after'][:5]} 전까지 다시 시도)")
         if hms > T["no_new_order_after"] and not d.done("buy") and not self.om.unresolved("buy"):
             if not d.s.get("buy_decision"):
                 self.record_buy_decision(False, "; ".join(["매수 시각 지남 (재시작·실패 등) (6장)"] + self.buy_gate()))
@@ -2805,6 +2833,8 @@ class Resident:
         if CFG.get("_filled"):  # 11K 보완 6: config.json 에 없어 config.example.json 기본값으로 채운 키
             rlog(f"설정: {CFG.get('_source')} 에 없는 키를 config.example.json 기본값으로 채움 {CFG['_filled']}", "WARN")
         self.start_heartbeat()
+        C.RateGate.configure(CFG.get("rate_limits"))  # 11L: 프로세스 전체 공용 키움 호출 제한기 (TR 별 간격, 실제 상주 실행에서만)
+        rlog(f"키움 호출 제한기: {C.RateGate.limits}", "INFO")
         self.auto_monthly = True
         while not os.path.exists(stop_flag()):
             step = "idle"

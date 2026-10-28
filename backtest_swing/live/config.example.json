@@ -5,6 +5,8 @@
   "env": "mock",
   "orders_enabled": false,
   "allow_prod_orders": false,
+  "rate_limits": {"mock": {"same_tr": 1.2}, "prod": {"order": 0.25, "query": 0.25, "kt00018": 0.5},
+                  "_note": "11L: 키움 호출 최소 간격 (초, 토큰(서버) 단위, 프로세스 전체). 모의: 같은 TR 사이 (키움 TR 1개당 초당 1회). 실전: 주문 TR 끼리·조회 TR 끼리 (초당 5회 -> 4회), kt00018 은 초당 2회 (키움 10-29 18시 뒤 초당 3회). 시세는 늘 실전 토큰"},
   "commission": {"mock": 0.0035, "prod": 0.00015, "_note": "11K 11: 매매수수료율 (키움 모의투자 0.35%, 실전 0.015%). 현금 대조·요약에 씀"},
   "log_dir": "logs/exec",
   "state_dir": "logs/exec/state",

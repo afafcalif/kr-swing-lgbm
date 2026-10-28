@@ -46,6 +46,7 @@ CHECK_DELAYS = (5, 30, 120)  # 응답 없음 다시 조회 (초)
 MAX_ATTEMPTS = {"buy": 2, "trend_sell": 2, "stop": None, "trend_late": None}  # None = 상한 없음 (거부가 계속되면 간격만 늘림, 11J)
 RETRY_FREE = 5        # 상한 없는 단계: 거부 5회까지는 매 분, 그 뒤 2·4·8분 ... 최대 10분 간격 (장 끝까지)
 RETRY_MAX_GAP = 10
+RATE_RETRIES = 3      # 11L: 유량 초과면 한 번의 보내기 안에서 간격(order_interval, 최소 1초)을 두고 다시 보내는 횟수 (거부 횟수와 따로)
 
 
 class NoResponse(Exception):
@@ -77,6 +78,12 @@ def auth_msg(m):
     return any(w in m for w in AUTH_WORDS)
 
 
+def rate_msg(rc, m):
+    """11L: 키움 유량 초과 응답 (return_code 5, "[1700:허용된 요청 개수를 초과하였습니다 ...]")"""
+    m = str(m or "")
+    return rc in (5, "5") or "1700" in m or "허용된 요청 개수" in m
+
+
 def classify(call):
     """주문 TR 호출 결과 분류 -> dict(outcome, return_code, msg, ord_no, cause).
     11J 보완 3 N2: 인증 실패·토큰 만료(토큰 발급 실패로 안 보냄, HTTP 401, 인증·토큰 거부 메시지)는 서버가 주문을 처리하지 않은 것 ->
@@ -105,6 +112,9 @@ def classify(call):
             except Exception:  # noqa: BLE001
                 j = {}
             rc = j.get("return_code")
+            if rc not in (None, 0, "0") and rate_msg(rc, j.get("return_msg")):
+                return {"outcome": NOT_SENT, "return_code": rc, "msg": str(j.get("return_msg", ""))[:200], "cause": f"HTTP {status} 유량 초과",
+                        "not_sent_kind": "rate"}
             if rc not in (None, 0, "0") and auth_msg(j.get("return_msg")):
                 return {"outcome": NOT_SENT, "return_code": rc, "msg": str(j.get("return_msg", ""))[:200], "cause": f"HTTP {status} 인증·토큰 거부",
                         "not_sent_kind": "auth"}
@@ -112,7 +122,8 @@ def classify(call):
                 return {"outcome": REJECTED, "return_code": rc, "msg": str(j.get("return_msg", ""))[:200], "cause": f"HTTP {status}"}
         return {"outcome": UNKNOWN, "cause": f"{type(e).__name__}: {e}"[:200]}
     if r is None:  # HTTP 429 (요청이 받아들여지지 않음, 주문 TR 은 클라이언트 재시도 없이 바로)
-        return {"outcome": REJECTED, "return_code": -429, "msg": "HTTP 429 유량 초과", "cause": "429"}
+        # 11L: 유량 초과는 서버가 처리하지 않은 것 -> 거부(REJECTED)가 아니라 보내지 않음(NOT_SENT rate): 거부 횟수에 안 세고 간격을 두고 다시
+        return {"outcome": NOT_SENT, "return_code": -429, "msg": "HTTP 429 유량 초과", "cause": "HTTP 429 유량 초과", "not_sent_kind": "rate"}
     try:
         j = r.json()
     except Exception as e:  # noqa: BLE001
@@ -126,6 +137,8 @@ def classify(call):
         return {"outcome": UNKNOWN, "cause": f"return_code 없음: {str(j)[:150]}"}
     if auth_msg(j.get("return_msg")):
         return {"outcome": NOT_SENT, "return_code": rc, "msg": str(j.get("return_msg", ""))[:200], "cause": "인증·토큰 거부", "not_sent_kind": "auth"}
+    if rate_msg(rc, j.get("return_msg")):  # 11L: return_code 5 유량 초과 = 처리 안 됨
+        return {"outcome": NOT_SENT, "return_code": rc, "msg": str(j.get("return_msg", ""))[:200], "cause": "유량 초과 (return_code 5)", "not_sent_kind": "rate"}
     return {"outcome": REJECTED, "return_code": rc, "msg": str(j.get("return_msg", ""))[:200], "cause": "return_code"}
 
 
@@ -168,11 +181,25 @@ class Broker:
     """키움 주문·계좌 TR. 주문은 classify() 결과 dict, 조회 실패는 NoResponse/QueryError"""
 
     ORDER_MAX_WAIT = 2.0  # 주문 TR 유량 대기 상한 (초). 넘으면 기다리지 않고 NOT_SENT (2차 확인 리뷰 4)
+    READ_MAX_WAIT = 5.0   # 11L: 조회 TR 의 공용 제한기 대기 상한 (초). 넘으면 조회 실패 (주 반복을 오래 붙잡지 않음)
 
-    def __init__(self, client, allow_orders=False):
+    def __init__(self, client, allow_orders=False, env=None):
+        """env: 이 클라이언트 토큰의 서버 (mock/prod) = 공용 호출 제한기(common.RateGate)의 키. 없으면 클라이언트 설정에서"""
         self.client, self.allow_orders = client, allow_orders
+        self.env = env or getattr(getattr(client, "settings", None), "env", None) or "mock"
+        # 11L 보완 1: 키움 클라이언트면 공용 제한기를 클라이언트의 전송 바로 앞 대기로 (자기 제한기 대신, 대기 장치 하나).
+        # send_gate 가 없는 클라이언트(가짜 서버)는 여기서 부르기 전에 기다림 (_gate_here)
+        self._gate_here = not hasattr(client, "send_gate")
+        if not self._gate_here:
+            from common import RateGate
+            client.send_gate = RateGate.client_gate(self.env, getattr(client, "rate_limiter", None))
         self.guard = None  # 주문 전송 직전 확인 함수 (OrderManager 가 매 전송마다 시간창 확인으로 넣는다)
         self._tl = threading.local()
+
+    def gap(self, tr):
+        """11L: 이 TR 의 공용 제한기 최소 간격 (초)"""
+        from common import RateGate
+        return RateGate.interval(self.env, tr)
 
     @contextlib.contextmanager
     def http_timeout(self, sec):
@@ -195,7 +222,12 @@ class Broker:
         lk = READ_SPEC[tr][0]
         cont, key, first, items = "N", "", None, []
         for page in range(MAX_PAGES):
-            kw = {"retry_429": False, **self._tkw()} if quick else self._tkw()
+            # 11L: 프로세스 전체 공용 제한기 (TR 별 간격·토큰 단위). 대기 상한을 넘으면 조회 실패. 클라이언트 안 429 재시도는 끔
+            # (유량 오류 = 조회 실패, 주 반복을 2·4·8초 붙잡지 않음, 다음 차례에 다시)
+            from common import RateGate
+            if self._gate_here and RateGate.wait(self.env, tr, max_wait=self.READ_MAX_WAIT) is None:
+                raise NoResponse(f"{tr} {page + 1}페이지: 유량 제한기 대기 {self.READ_MAX_WAIT:.0f}초 넘음 (조회 실패, 보내지 않음)")
+            kw = {"retry_429": False, **({} if self._gate_here else {"max_wait": self.READ_MAX_WAIT}), **self._tkw()}
             try:
                 r = self.client.request(tr_code=tr, method="POST", path=path, json=body, cont_yn=cont, next_key=key, **kw)
             except TypeError:  # cont_yn 인자를 모르는 클라이언트
@@ -203,11 +235,13 @@ class Broker:
             except Exception as e:  # noqa: BLE001
                 raise NoResponse(f"{tr} {page + 1}페이지: {str(e)[:180]}") from e
             if r is None:
-                raise NoResponse(f"{tr} {page + 1}페이지: HTTP 429 재시도 끝")
+                raise NoResponse(f"{tr} {page + 1}페이지: HTTP 429 유량 초과 (조회 실패)")
             try:
                 j = r.json()
             except Exception as e:  # noqa: BLE001
                 raise QueryError(f"{tr} {page + 1}페이지 JSON 파싱 오류: {e!r}"[:200]) from e
+            if isinstance(j, dict) and rate_msg(j.get("return_code"), j.get("return_msg")):
+                raise QueryError(f"{tr} {page + 1}페이지: 유량 초과 (조회 실패) {str(j.get('return_msg', ''))[:100]}")
             validate_read(tr, j)
             if first is None:
                 first = dict(j)
@@ -231,6 +265,10 @@ class Broker:
         def call():
             if not self.allow_orders:
                 raise OrdersDisabled(tr)
+            from common import RateGate
+            from kiwoom.errors import NotSent
+            if self._gate_here and RateGate.wait(self.env, tr, max_wait=self.ORDER_MAX_WAIT) is None:  # 11L: 가짜 서버만 여기서 (키움 클라이언트는 전송 바로 앞)
+                raise NotSent(f"유량 대기 상한 {self.ORDER_MAX_WAIT}초 초과 (공용 제한기, api-id={tr}) - 보내지 않음")
             # 확인 리뷰 26: 주문 TR 은 클라이언트 안 429 재시도(2·4·8초 대기)를 끈다. 429 = 받아들여지지 않음(REJECTED -429) ->
             # OrderManager 가 매 전송 직전 시간창을 확인하며 다시 보낸다
             return self.client.request(tr_code=tr, method="POST", path=ORDR, json=body, retry_429=False,
@@ -619,7 +657,7 @@ class OrderManager:
             from common import now_kst as clock
         self.b, self.clock, self.sleep, self.notify = broker, clock, sleep, notify
         t = times or {}
-        self.t = {"buy_from": t.get("buy_from", "15:21:00"), "buy_until": t.get("buy_until", "15:25:00"),
+        self.t = {"buy_from": t.get("buy_from", "15:21:00"),   # 11L 보완 2: buy_until 은 안 씀 (매수 마감 하나 = no_new_order_after)
                   "no_new_order_after": t.get("no_new_order_after", "15:28:00"), "close_check": t.get("close_check", "15:35:00"),
                   "trend_sell_from": t.get("trend_sell_from", "08:30:00"), "trend_sell_until": t.get("trend_sell_until", "08:59:00"),
                   "stop_from": t.get("stop_from", "09:00:00"), "stop_until": t.get("stop_until", "15:20:00"),
@@ -684,11 +722,20 @@ class OrderManager:
                 res = e
             finally:
                 self.b.guard = None
-            if isinstance(res, dict) and res.get("outcome") == NOT_SENT and res.get("not_sent_kind") == "rate" and retry_now and rate_waits < 5:
-                rate_waits += 1  # 유량 대기 상한 초과: 1초 뒤 시간창 안에서만 다시 (거부 횟수에는 안 셈)
-                self.store.update(it, status=NOT_SENT, cause=res.get("cause"), resendable=True, not_sent_kind="rate")
-                self.sleep(1.0)
-                continue
+            if isinstance(res, dict) and res.get("outcome") == NOT_SENT and res.get("not_sent_kind") == "rate":
+                # 11L: 유량 초과(HTTP 429·return_code 5·유량 대기 상한) = 처리 안 됨. 거부 횟수에 안 세고 간격을 두고 다시 (모든 단계, 한 번에 최대 RATE_RETRIES).
+                # 시간창 안에서만 (매수 = 15:28 전, 11L 보완 2). 다 쓰면 NOT_SENT(다시 보내도 됨) -> 매수·08:30 추세 매도는 다음 분 다시 보내기, 매도 의무는 다음 분
+                self.store.update(it, status=NOT_SENT, cause=res.get("cause"), resendable=True, not_sent_kind="rate", return_msg=res.get("msg"),
+                                  return_code=res.get("return_code"))
+                tr = "kt10000" if side == "buy" else "kt10003" if stage == "cancel" else "kt10001"
+                gap = max(self.b.gap(tr) if hasattr(self.b, "gap") else 0.0, 1.0)  # 공용 제한기 간격, 최소 1초
+                later = (self.clock() + pd.Timedelta(seconds=gap)).strftime("%H:%M:%S")
+                if rate_waits < RATE_RETRIES and (window is None or (later <= window[1] if window[2] else later < window[1])):
+                    rate_waits += 1
+                    self.sleep(gap)
+                    continue
+                self.notify(f"[주문 유량 초과] {stage} {side} {code} {qty}주: {res.get('cause')} {rate_waits + 1}번 — 거부 횟수에 안 셈, 다음 차례(다음 분)에 다시"[:300])
+                return it
             try:
                 if isinstance(res, Exception):
                     raise res
@@ -844,8 +891,8 @@ class OrderManager:
                 out.append({"skipped": "증거금 부족(백테스트는 매수)", "code": p["code"], "need": need, "left": left})
                 continue
             now = self.hms()
-            if not (self.t["buy_from"] <= now <= self.t["buy_until"]) or now >= self.t["no_new_order_after"]:
-                out.append({"skipped": f"보내지 않음 (시각 {now}, 보내는 시각 {self.t['buy_from']} ~ {self.t['buy_until']})", "code": p["code"]})
+            if not (self.t["buy_from"] <= now < self.t["no_new_order_after"]):  # 11L 보완 2: 매수 전송은 15:21 부터 15:28 전까지 하나 (동시호가 = 종가 체결)
+                out.append({"skipped": f"보내지 않음 (시각 {now}, 보내는 시각 {self.t['buy_from']} ~ {self.t['no_new_order_after']} 전)", "code": p["code"]})
                 continue
             r = self._send("buy", "buy", p["code"], p["qty"], p["limit_price"], "0", kind, buy_label(kind), "buy",
                            lambda p=p: self.b.buy_limit(p["code"], p["qty"], p["limit_price"]), retry_now=True,
