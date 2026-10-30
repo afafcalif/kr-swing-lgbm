@@ -6,6 +6,8 @@
 - 비공개 저장소는 읽기만 한다: `git show <rev>:<경로>` 로 커밋된 내용을 읽는다 (작업 폴더·인덱스를 건드리지 않음).
 - --held 는 실제 장부·보유 장부·주문 기록이 있는 폴더 (logs/exec 또는 그 백업 사본). 거기 나온 종목 코드는 복사본에서
   가짜 코드로 바꾸고, 저장소 검사에서도 남아 있으면 실패한다 (백테스트 결과 폴더 제외). 코드는 이 파일에 적지 않는다.
+  같은 기록의 실제 체결·주문 가격, 체결 금액, 체결 수량(10주 이상)도 실행 쪽 파일·문서에 남아 있으면 실패한다
+  (명세·시험에 인용된 체결 값은 FILL_TEMPLATES 로 가짜 체결로 바꿈).
 - ALLOW 에 적은 파일만 복사한다. DENY 에 걸리는 경로는 ALLOW 에 있어도 복사하지 않고 실패한다.
 - 개인 경로·저장소 이름 같은 서술은 일반 표현으로 바꾼다 (REWRITE, PATH_REWRITE). 바꿀 곳이 없으면 실패
   (원본이 바뀐 것을 놓치지 않게).
@@ -24,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 from datetime import date
+from fractions import Fraction
 from pathlib import Path
 
 DST = Path(__file__).resolve().parents[1]
@@ -104,10 +107,65 @@ REWRITE = [
     ("backtest_swing/EXEC_SPEC.md", re.compile(r"D\+2 추정예수금 [\d,]+ vs 기대 [\d,]+ \(차이 (\d+), 허용 (\d+)\)"),
      lambda m: f"D+2 추정예수금이 기대값보다 {m.group(1)}원 많음, 허용 {m.group(2)}"),
     ("backtest_swing/EXEC_SPEC.md", re.compile(r" 전일 D\+2 = [\d,]+\."), ""),
-    (LIVE + "test_memcash.py", re.compile(r"PREV_D2, ACTUAL_D2 = ([\d_]+)\.0, ([\d_]+)\.0"),
-     lambda m: "PREV_D2, ACTUAL_D2 = 10_000_000.0, {:_}.0  # 공개 사본: 계좌 금액 대신 같은 차이의 가짜 값".format(
-         10_000_000 - int(m.group(1).replace("_", "")) + int(m.group(2).replace("_", "")))),
 ]
+
+# 실제 체결 값 (10-29 현금 대조 시험·명세 인용): 종목 코드를 가려도 날짜 + 가격으로 종목을 알 수 있어 가짜 체결로 바꾼다.
+# 실제 값은 원본 시험에서 읽고(이 파일에는 적지 않음), 아래 계산식으로 만든 문구가 원본과 정확히 같아야 한다 (원본이 바뀌면 실패).
+# 가짜 값은 실제 값과 관계없이 정한 값: 비율로 바꾸면 비율이 공개돼 실제 가격을 되돌려 알 수 있어서. 같은 호가 구간(매도
+# 2,000 ~ 5,000원, 5원 단위)·같은 모양(매도 하나는 두 호가에 나눠 체결, 기록 체결가는 원 단위로 끊은 평균, 매수 셋)이라 시험의
+# 수수료 10원 절사·세금 원 절사·허용치·예전 계산 실패 조건이 그대로 성립한다.
+FAKE_FILLS = {"s_hi": 2845, "n_hi": 47, "s_lo": 2840, "n_lo": 109,
+              "buys": [(1, 447500), (18, 41250), (1, 723000)], "prev": 10_000_000}
+FILLS_SRC = LIVE + "test_memcash.py"
+FILLS_READ = [  # (이름, 원본 시험에서 읽는 정규식)
+    ("sell", re.compile(r'"side": "sell", "code": "\d{6}", "filled_qty": (\d+), "fill_price": (\d+)\.0\}')),
+    ("buys", re.compile(r'"side": "buy", "code": "\d{6}", "filled_qty": (\d+), "fill_price": (\d+)\.0\}')),
+    ("split", re.compile(r"# 실제 체결 금액 [\d,]+ \((\d+) x (\d+) \+ (\d+) x (\d+)\)")),
+    ("d2", re.compile(r"PREV_D2, ACTUAL_D2 = ([\d_]+)\.0, ([\d_]+)\.0")),
+]
+# (파일, 문구 틀, 원본에 나오는 횟수). EXEC_SPEC 은 위 REWRITE(계좌 금액) 뒤의 문구.
+FILL_TEMPLATES = [
+    (FILLS_SRC, "PREV_D2, ACTUAL_D2 = {prev_u}.0, {actual_u}.0{note}", 1),
+    (FILLS_SRC, '"filled_qty": {q_s}, "fill_price": {p_s}.0}},    # 시장가 손절: 실제 평균 약 {avg} (기록은 끊긴 값)', 1),
+    (FILLS_SRC, '"filled_qty": {q1}, "fill_price": {p1}.0}}', 1),
+    (FILLS_SRC, '"filled_qty": {q2}, "fill_price": {p2}.0}}', 1),
+    (FILLS_SRC, '"filled_qty": {q3}, "fill_price": {p3}.0}}', 1),
+    (FILLS_SRC, "P.kiwoom_fee({a1}, 0.0035), {f1})", 1),
+    (FILLS_SRC, "# {raw_f1} -> 10원 미만 절사", 1),
+    (FILLS_SRC, "P.kiwoom_fee({a2}, 0.0035), {f2})", 1),
+    (FILLS_SRC, "P.kiwoom_fee({a3}, 0.0035), {f3})", 1),
+    (FILLS_SRC, "# {raw_f3}\n", 1),
+    (FILLS_SRC, "P.kiwoom_tax({exact}, 0.002), {ts})", 1),
+    (FILLS_SRC, "# {raw_ts} -> 원 미만 절사", 1),
+    (FILLS_SRC, "fill_price={exact} / {q_s})", 1),
+    (FILLS_SRC, "# 실제 체결 금액 {exact_c} ({s_hi} x {n_hi} + {s_lo} x {n_lo})", 1),
+    (FILLS_SRC, "ACTUAL_D2 - exp, {diff}.0, delta=0.01)", 1),
+    (FILLS_SRC, "# 남는 차이 = 체결가 끊김 ({exact_c} - {rec_c})", 1),
+    (FILLS_SRC, "tol, 1 + ({q_s} + 12) + ({q1} + 12) + ({q2} + 12) + ({q3} + 12))", 1),
+    (FILLS_SRC, "# {tol}\n", 1),
+    (FILLS_SRC, "+ {p_s} * {q_s} * (1 - 0.0035 - 0.002)", 1),
+    (FILLS_SRC, "허용치(81)로는 {old} -> 실패였음", 1),
+    (FILLS_SRC, '"cntr_qty": "{q_s}", "cntr_pric": "{p_s}", "tdy_trde_cmsn": "{fs}", "tdy_trde_tax": "{ts}"', 1),
+    (FILLS_SRC, '{{"fee_won": {fs}.0, "tax_won": {ts}.0}}', 2),
+    (FILLS_SRC, '(c["cash_diff"], c["tolerance"], c["n_fills"]), ({diff}.0, {tol}.0, 4)', 1),
+    (FILLS_SRC, 'c["fee_tax_rule"], {f1} + {f2} + {f3} + {fs} + {ts})', 1),
+    (LIVE + "positions.py", "{q_s}주 기록 {p_s} = 실제 평균 약 {avg})", 1),
+    ("backtest_swing/EXEC_SPEC.md", "{q_s}주 시장가 접수 -> 전량 체결 {p_s} ->", 1),
+    ("backtest_swing/EXEC_SPEC.md", "갱신 전까지 {q_s}주로 남는다", 1),
+    ("backtest_swing/EXEC_SPEC.md", "기대값보다 {old}원 많음, 허용 81", 1),
+    ("backtest_swing/EXEC_SPEC.md", " {q_s}주 시장가 (기록 체결가 {p_s}), 매수 ", 1),
+    ("backtest_swing/EXEC_SPEC.md", " {q1}주 {p1_c}·", 1),
+    ("backtest_swing/EXEC_SPEC.md", " {q2}주 {p2_c}·", 1),
+    ("backtest_swing/EXEC_SPEC.md", " {q3}주 {p3_c}. 원인", 1),
+    ("backtest_swing/EXEC_SPEC.md", "기록 체결가 {p_s} 은 5원 호가 단위", 1),
+    ("backtest_swing/EXEC_SPEC.md", "{s_lo}·{s_hi} 에 나눠 체결되면 실제 금액은 {q_s} x {p_s} = {rec_c} 보다 최대 {maxgap}원 많다 "
+                                    "({s_hi} x {n_hi} + {s_lo} x {n_lo} = {exact_c} 이면 {diff}원)", 1),
+    ("backtest_swing/EXEC_SPEC.md", "(이번 4건 약 {trunc}원)", 1),
+    ("backtest_swing/EXEC_SPEC.md", "실제 금액 {exact_c} + 수수료", 1),
+    ("backtest_swing/EXEC_SPEC.md", "10-29 = 1 + {q_s12} + {q1_12} + {q2_12} + {q3_12} = {tol}원, 남는 차이 {diff}원", 1),
+    ("backtest_swing/EXEC_SPEC.md", "기록 체결가면 {diff}원 < {tol}원, 예전 81원 넘음", 1),
+]
+FEE_RATE, TAX_RATE = Fraction(35, 10000), Fraction(2, 1000)  # 모의 수수료 0.35%, 2026 매도세 0.20% (시험과 같은 값)
 # 백업 공유 폴더·작업·계정 이름: 원본에서 읽어(이 파일에는 적지 않음) 복사본 전체에서 일반 표현으로 바꾼다. 못 찾으면 실패.
 NAME_SOURCES = {
     "folder": (LIVE + "SETUP.md", re.compile(r"New-SmbShare -Name \S+ -Path (\S+)")),
@@ -297,6 +355,50 @@ def report(title: str, hits) -> None:
         print(f"  {where} [{rule}]")
 
 
+def held_values(dirs: list[str]) -> set[str]:
+    """--held 폴더의 보유 장부·주문 기록에 나온 실제 체결·주문 가격(1,000원 이상)·체결 금액·체결 수량(10주 이상) 문구"""
+    toks = set()
+
+    def money(x):
+        toks.update({str(x), f"{x:,}", f"{x:_}"})
+
+    def walk(o):
+        if isinstance(o, dict):
+            q = o.get("filled_qty")
+            for k in ("fill_price", "avg_price", "entry_price", "price"):
+                x = o.get(k)
+                if isinstance(x, (int, float)) and x >= 1000 and x == int(x):
+                    money(int(x))
+            if isinstance(q, int) and q > 0 and isinstance(o.get("fill_price"), (int, float)):
+                if q * o["fill_price"] >= 10_000 and q * o["fill_price"] == int(q * o["fill_price"]):
+                    money(int(q * o["fill_price"]))
+                if q >= 10:
+                    toks.update({f"{q}주", f'"filled_qty": {q}', f'"cntr_qty": "{q}"'})
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    for d in map(Path, dirs):
+        for f in [*d.glob("state/positions.json*"), *d.glob("state/intents/*.json"),
+                  *d.glob("*/state/positions.json*"), *d.glob("*/state/intents/*.json")]:
+            walk(json.loads(f.read_text(encoding="utf-8")))
+    return toks
+
+
+def value_hits(root: Path, rels, toks) -> list[tuple[str, str]]:
+    """실제 체결 가격·금액·수량 문구가 남은 곳 (값은 출력하지 않음)"""
+    if not toks:
+        return []
+    rx = re.compile(r"(?<![\d,_.])(?:" + "|".join(sorted(map(re.escape, toks), key=len, reverse=True)) + r")(?![\d_]|[.,]\d)")
+    hits = []
+    for rel in rels:
+        for i, line in enumerate((root / rel).read_bytes().decode("utf-8", errors="replace").splitlines()):
+            hits += [(f"{rel}:{i + 1}:{m.start() + 1}", "held-fill-value") for m in rx.finditer(line)]
+    return hits
+
+
 def held_codes(dirs: list[str]) -> set[str]:
     """--held 폴더(logs/exec 또는 그 백업 사본)의 장부·보유 장부·주문 기록에 나온 종목 코드 (실제 보유·주문 종목)"""
     codes = set()
@@ -341,6 +443,73 @@ def mask_codes(stage: Path, held: set[str]) -> tuple[dict[str, str], list[str]]:
     return {c: str(MASK_BASE + i) for i, c in enumerate(codes)}, errs
 
 
+def fill_fields(v: dict) -> dict[str, str]:
+    """체결 값 v 로 시험·명세 문구의 숫자를 계산 (positions.kiwoom_fee·kiwoom_tax·cash_tolerance·expected_cash 와 같은 규칙)"""
+    def fee(x):
+        return (Fraction(x) * FEE_RATE // 10) * 10
+
+    def tax(x):
+        return Fraction(x) * TAX_RATE // 1
+
+    def short(x):  # 2278.5, 1578.38, 3461.36
+        return f"{float(x):.2f}".rstrip("0").rstrip(".")
+
+    q_s = v["n_hi"] + v["n_lo"]
+    exact = v["s_hi"] * v["n_hi"] + v["s_lo"] * v["n_lo"]
+    p_s = exact // q_s
+    rec = p_s * q_s
+    buys = v["buys"]
+    amts = [q * p for q, p in buys]
+    fs, ts, fb = fee(exact), tax(exact), [fee(a) for a in amts]
+    diff = (exact - fs - ts) - (rec - fee(rec) - tax(rec))
+    net = exact - fs - ts - sum(a + f for a, f in zip(amts, fb))
+    old = net - (-sum(a * (1 + FEE_RATE) for a in amts) + rec * (1 - FEE_RATE - TAX_RATE))
+    trunc = sum(Fraction(a) * FEE_RATE - f for a, f in zip([exact, *amts], [fs, *fb])) + Fraction(exact) * TAX_RATE - ts
+    f = {"q_s": q_s, "p_s": p_s, "exact": exact, "rec": rec, "s_hi": v["s_hi"], "n_hi": v["n_hi"], "s_lo": v["s_lo"],
+         "n_lo": v["n_lo"], "fs": fs, "ts": ts, "diff": diff, "tol": 1 + sum(q + 12 for q in [q_s] + [q for q, _ in buys]),
+         "old": round(old), "trunc": int(trunc), "maxgap": q_s - 1, "q_s12": q_s + 12,
+         "prev_u": f"{v['prev']:_}", "actual_u": f"{v['prev'] + net:_}", "note": v.get("note", ""),
+         "avg": short(Fraction(exact, q_s)), "raw_f1": short(amts[0] * FEE_RATE), "raw_f3": short(amts[2] * FEE_RATE),
+         "raw_ts": short(exact * TAX_RATE), "exact_c": f"{exact:,}", "rec_c": f"{rec:,}"}
+    for i, ((q, p), a, fe) in enumerate(zip(buys, amts, fb), 1):
+        f.update({f"q{i}": q, f"p{i}": p, f"p{i}_c": f"{p:,}", f"a{i}": a, f"f{i}": fe, f"q{i}_12": q + 12})
+    return {k: str(x) for k, x in f.items()}
+
+
+def real_fills(stage: Path) -> tuple[dict | None, list[str]]:
+    t = (stage / FILLS_SRC).read_bytes().decode("utf-8")
+    got = {k: rx.findall(t) for k, rx in FILLS_READ}
+    if [len(got[k]) for k, _ in FILLS_READ] != [1, 3, 1, 1]:
+        return None, [f"{FILLS_SRC}: 체결 값을 원본에서 못 읽음 (FILLS_READ 확인)"]
+    s_hi, n_hi, s_lo, n_lo = map(int, got["split"][0])
+    prev, actual = (int(x.replace("_", "")) for x in got["d2"][0])
+    v = {"s_hi": s_hi, "n_hi": n_hi, "s_lo": s_lo, "n_lo": n_lo, "prev": prev,
+         "buys": [(int(q), int(p)) for q, p in got["buys"]]}
+    f = fill_fields(v)
+    errs = []
+    if (got["sell"][0] != (f["q_s"], f["p_s"])) or int(f["actual_u"].replace("_", "")) != actual:
+        errs.append(f"{FILLS_SRC}: 원본 체결 값이 계산식과 맞지 않음 (fill_fields 확인)")
+    return v, errs
+
+
+def replace_fills(stage: Path) -> tuple[list[str], list[str]]:
+    """체결 값 문구를 가짜로 바꿈. 반환 (오류, 원본 체결 값 문구들 = 남았는지 검사할 값)"""
+    v, errs = real_fills(stage)
+    if errs:
+        return errs, []
+    real, fake = fill_fields(v), fill_fields({**FAKE_FILLS, "note": "  # 공개 사본: 계좌 금액·체결 값은 같은 계산이 성립하는 가짜 값"})
+    for p, tpl, count in FILL_TEMPLATES:
+        f = stage / p
+        t = f.read_bytes().decode("utf-8")
+        old, new = tpl.format(**real), tpl.format(**fake)
+        if t.count(old) != count:
+            errs.append(f"{p}: 체결 값 문구가 원본에 {t.count(old)}번 (기대 {count}번, FILL_TEMPLATES 확인)")
+            continue
+        f.write_bytes(t.replace(old, new).encode("utf-8"))
+    keys = ("p_s", "exact_c", "rec_c", "p1", "p2", "p3", "p1_c", "p2_c", "p3_c", "a2", "s_hi", "s_lo")
+    return errs, sorted({real[k] for k in keys} | {f"{real['q_s']}주", real["actual_u"], real["prev_u"]})
+
+
 def held_hits(root: Path, rels, held: set[str]) -> list[tuple[str, str]]:
     """보유·주문 종목 코드가 남은 곳 (백테스트 결과 폴더는 예전부터 공개한 결과라 보지 않음)"""
     rx = re.compile(r"(?<!\d)(?:" + "|".join(sorted(held)) + r")(?!\d)")
@@ -369,7 +538,8 @@ def mask_names(t: str, names: dict[str, str]) -> str:
     return re.sub(r"(?<![\w-])" + re.escape(names["account"]) + r"(?![\w-])", "<백업 계정>", t)
 
 
-def apply_rewrites(stage: Path, src: Path, held: set[str], names: dict[str, str]) -> list[str]:
+def apply_rewrites(stage: Path, src: Path, held: set[str], names: dict[str, str]) -> tuple[list[str], list[str]]:
+    """반환 (오류, 원본 체결 값 문구 = 복사본에 남았는지 볼 값)"""
     masks, errs = mask_codes(stage, held)
     for p, old, new in REWRITE:
         f = stage / p
@@ -381,6 +551,8 @@ def apply_rewrites(stage: Path, src: Path, held: set[str], names: dict[str, str]
         if not n:
             errs.append(f"{p}: 바꿀 곳이 원본에 없음 (REWRITE 항목 확인)")
         f.write_bytes(t2.encode("utf-8"))
+    fill_errs, fill_toks = replace_fills(stage)
+    errs += fill_errs
     src_forms = sorted({str(src), str(src).replace("\\", "/")}, key=len, reverse=True)
     for p in PATH_REWRITE:
         f = stage / p
@@ -402,7 +574,7 @@ def apply_rewrites(stage: Path, src: Path, held: set[str], names: dict[str, str]
             t = f.read_bytes().decode("utf-8")
             t = rx.sub(lambda m: masks[m.group(1)], t) if rx else t
             f.write_bytes(mask_names(t, names).encode("utf-8"))
-    return errs
+    return errs, fill_toks
 
 
 def main() -> int:
@@ -418,7 +590,7 @@ def main() -> int:
     if src == DST:
         print("src 와 이 저장소가 같음", file=sys.stderr)
         return 2
-    held = held_codes(a.held)
+    held, held_vals = held_codes(a.held), held_values(a.held)
     if not held:
         print("--held 폴더에서 종목 코드를 못 읽음 (장부·보유·주문 기록 폴더인지 확인)", file=sys.stderr)
         return 2
@@ -445,11 +617,13 @@ def main() -> int:
                 if p.endswith((".bat", ".ps1")):  # cmd·PowerShell 용은 CRLF (.gitattributes 와 같게)
                     data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
                 out.write_bytes(data)
-            errs = apply_rewrites(stage, src, held, names)
+            errs, fill_toks = apply_rewrites(stage, src, held, names)
             if errs:
                 print("바꾸기 실패:", *errs, sep="\n  ")
                 return 1
             hits = scan_files(stage, ALLOW, ctx, light={p for p in ALLOW if p.startswith(LIGHT_PREFIXES)})
+            hits += value_hits(stage, [p for p in ALLOW if is_text(p) and not p.startswith(LIGHT_PREFIXES)],
+                               held_vals | set(fill_toks))
             if hits:
                 report("검사 실패 (저장소에 쓰지 않음)", hits)
                 return 1
@@ -470,7 +644,9 @@ def main() -> int:
     hits += scan_files(DST, files, ctx, light={f for f in files if f.startswith(LIGHT_PREFIXES)})
     # 보유·주문 종목 코드: 실행 쪽 파일과 설명 문서만 (백테스트 코드·결과는 실행 전부터 공개한 것이라 우연히 겹칠 수 있음)
     held_scope = ("backtest_swing/live/", "kiwoom/", "backtest_swing/EXEC_SPEC.md", "README.md", "docs/")
-    hits += held_hits(DST, [f for f in files if f.startswith(held_scope) and is_text(f)], held)
+    scoped = [f for f in files if f.startswith(held_scope) and is_text(f)]
+    hits += held_hits(DST, scoped, held)
+    hits += value_hits(DST, [f for f in scoped if not f.startswith(LIGHT_PREFIXES)], held_vals)
     if hits:
         report("저장소 검사 실패", hits)
         return 1

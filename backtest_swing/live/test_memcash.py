@@ -242,23 +242,23 @@ class PoolLifecycle(Base):
 
 # ---------------------------------------------------------------- B 현금 대조 (2026-10-29 숫자)
 
-PREV_D2, ACTUAL_D2 = 10_000_000.0, 8_700_352.0  # 공개 사본: 계좌 금액 대신 같은 차이의 가짜 값
-FILLS_1029 = [{"side": "sell", "code": "990011", "filled_qty": 228, "fill_price": 3461.0},    # 시장가 손절: 실제 평균 약 3461.36 (기록은 끊긴 값)
-              {"side": "buy", "code": "990003", "filled_qty": 1, "fill_price": 651000.0},
-              {"side": "buy", "code": "990008", "filled_qty": 25, "fill_price": 35650.0},
-              {"side": "buy", "code": "990005", "filled_qty": 1, "fill_price": 535000.0}]
+PREV_D2, ACTUAL_D2 = 10_000_000.0, 8_521_159.0  # 공개 사본: 계좌 금액·체결 값은 같은 계산이 성립하는 가짜 값
+FILLS_1029 = [{"side": "sell", "code": "990011", "filled_qty": 156, "fill_price": 2841.0},    # 시장가 손절: 실제 평균 약 2841.51 (기록은 끊긴 값)
+              {"side": "buy", "code": "990003", "filled_qty": 1, "fill_price": 447500.0},
+              {"side": "buy", "code": "990008", "filled_qty": 18, "fill_price": 41250.0},
+              {"side": "buy", "code": "990005", "filled_qty": 1, "fill_price": 723000.0}]
 
 
 class Cash(Base):
     def test_kiwoom_rounding(self):
-        self.assertEqual(P.kiwoom_fee(651000, 0.0035), 2270)                            # 2278.5 -> 10원 미만 절사
-        self.assertEqual(P.kiwoom_fee(891250, 0.0035), 3110)
-        self.assertEqual(P.kiwoom_fee(535000, 0.0035), 1870)                            # 1872.5
-        self.assertEqual(P.kiwoom_tax(789190, 0.002), 1578)                             # 1578.38 -> 원 미만 절사
+        self.assertEqual(P.kiwoom_fee(447500, 0.0035), 1560)                            # 1566.25 -> 10원 미만 절사
+        self.assertEqual(P.kiwoom_fee(742500, 0.0035), 2590)
+        self.assertEqual(P.kiwoom_fee(723000, 0.0035), 2530)                            # 2530.5
+        self.assertEqual(P.kiwoom_tax(443275, 0.002), 886)                             # 886.55 -> 원 미만 절사
         self.assertEqual(P.kiwoom_tax(1000, 0.002), 2)                                  # 부동소수 2.0000000000000004 / 1.9999.. 에 흔들리지 않음
 
     def test_1029_matches_with_true_fill_amount(self):
-        exact = [dict(FILLS_1029[0], fill_price=789190 / 228)] + FILLS_1029[1:]         # 실제 체결 금액 789,190 (3465 x 62 + 3460 x 166)
+        exact = [dict(FILLS_1029[0], fill_price=443275 / 156)] + FILLS_1029[1:]         # 실제 체결 금액 443,275 (2845 x 47 + 2840 x 109)
         exp, n = P.expected_cash(PREV_D2, exact, 2026, commission=0.0035)
         self.assertEqual(n, 4)
         self.assertAlmostEqual(exp, ACTUAL_D2, delta=0.01)                              # 키움 절사 규칙이면 원 단위까지 같음
@@ -266,17 +266,17 @@ class Cash(Base):
     def test_1029_recorded_price_within_tolerance(self):
         exp, n = P.expected_cash(PREV_D2, FILLS_1029, 2026, commission=0.0035)
         tol = P.cash_tolerance(FILLS_1029)
-        self.assertAlmostEqual(ACTUAL_D2 - exp, 82.0, delta=0.01)                       # 남는 차이 = 체결가 끊김 (789,190 - 789,108)
-        self.assertEqual(tol, 1 + (228 + 12) + (1 + 12) + (25 + 12) + (1 + 12))          # 304
+        self.assertAlmostEqual(ACTUAL_D2 - exp, 79.0, delta=0.01)                       # 남는 차이 = 체결가 끊김 (443,275 - 443,196)
+        self.assertEqual(tol, 1 + (156 + 12) + (1 + 12) + (18 + 12) + (1 + 12))          # 225
         self.assertLessEqual(abs(ACTUAL_D2 - exp), tol)
-        old = PREV_D2 - sum(r["fill_price"] * r["filled_qty"] * 1.0035 for r in FILLS_1029[1:]) + 3461 * 228 * (1 - 0.0035 - 0.002)
-        self.assertGreater(ACTUAL_D2 - old, 20 * 4 + 1)                                 # 예전 계산·허용치(81)로는 104 -> 실패였음
+        old = PREV_D2 - sum(r["fill_price"] * r["filled_qty"] * 1.0035 for r in FILLS_1029[1:]) + 2841 * 156 * (1 - 0.0035 - 0.002)
+        self.assertGreater(ACTUAL_D2 - old, 20 * 4 + 1)                                 # 예전 계산·허용치(81)로는 96 -> 실패였음
         self.assertGreater(abs(ACTUAL_D2 - 400 - exp), tol)                              # 수백 원 넘는 차이는 계속 잡음
         self.assertEqual(P.cash_tolerance([]), 1.0)
 
     def test_fill_costs_from_ka10076(self):
-        rows = [{"cntr_qty": "228", "cntr_pric": "3461", "tdy_trde_cmsn": "2760", "tdy_trde_tax": "1578"}]
-        self.assertEqual(O.fill_costs(rows), {"fee_won": 2760.0, "tax_won": 1578.0})
+        rows = [{"cntr_qty": "156", "cntr_pric": "2841", "tdy_trde_cmsn": "1550", "tdy_trde_tax": "886"}]
+        self.assertEqual(O.fill_costs(rows), {"fee_won": 1550.0, "tax_won": 886.0})
         self.assertEqual(O.fill_costs([{"cntr_qty": "1", "cntr_pric": "10"}]), {})       # 필드 없으면 기록 안 함
         self.assertEqual(O.fill_costs([{"tdy_trde_cmsn": "", "tdy_trde_tax": "x"}]), {})
 
@@ -286,14 +286,14 @@ class Cash(Base):
         for i, f in enumerate(FILLS_1029):
             it = res.om.store.add(date=res.om.date(), stage="stop" if f["side"] == "sell" else "buy", side=f["side"], code=f["code"],
                                   qty=f["filled_qty"], price=None, trde_tp="3", attempt=1, kind="본래", reason="시험", assumed_kind=f["side"])
-            extra = {"fee_won": 2760.0, "tax_won": 1578.0} if f["side"] == "sell" else {}
+            extra = {"fee_won": 1550.0, "tax_won": 886.0} if f["side"] == "sell" else {}
             res.om.store.update(it, status=O.ACCEPTED, ord_no=f"N{i}", filled_qty=f["filled_qty"], fill_price=f["fill_price"], fill_status="체결", **extra)
         self.fk.d2 = ACTUAL_D2
         res.settle()
         c = res.day.s["cash_check"]
         self.assertTrue(c["ok"], c)
-        self.assertEqual((c["cash_diff"], c["tolerance"], c["n_fills"]), (82.0, 304.0, 4))
-        self.assertEqual(c["fee_tax_rule"], 2270 + 3110 + 1870 + 2760 + 1578)          # 규칙 계산 비용 합
+        self.assertEqual((c["cash_diff"], c["tolerance"], c["n_fills"]), (79.0, 225.0, 4))
+        self.assertEqual(c["fee_tax_rule"], 1560 + 2590 + 2530 + 1550 + 886)          # 규칙 계산 비용 합
         self.assertIsNone(c["fee_tax_kiwoom"])                                          # 매수 3건에 체결 조회 비용 필드 없음
         self.assertFalse(any("현금 차이" in a for a in self.alerts))
 
