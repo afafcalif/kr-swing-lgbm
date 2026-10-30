@@ -32,10 +32,10 @@ class Orders(unittest.TestCase):
         fk = FakeKiwoom(clk)
         om = O.OrderManager(O.Broker(fk, allow_orders=True), clock=clk, sleep=clk.sleep, notify=notes.append)
         watch = O.AccountWatch(notify=notes.append)
-        pos = {"held": {"084670": {"qty": 28, "stop_price": 30000}}}
+        pos = {"held": {"990006": {"qty": 28, "stop_price": 30000}}}
         r = O.stop_cycle(om, watch, pos, lambda cs: {c: 29000 for c in cs}, lambda: {"acnt_evlt_remn_indv_tot": []}, clk(), set())
         self.assertEqual(len(sends(fk, "kt10001")), 0)               # 계좌 조회 성공, 계좌에 없음 -> 팔지 않음
-        self.assertEqual(r["not_in_account"], ["084670"])
+        self.assertEqual(r["not_in_account"], ["990006"])
         self.assertEqual(sum("보유 불일치" in n for n in notes), 1)
         def fail():
             raise O.NoResponse("502")
@@ -55,7 +55,7 @@ class Orders(unittest.TestCase):
         self.assertTrue(any(f.startswith("2026-10-26.json.corrupt-") for f in os.listdir(os.path.dirname(p))))   # 손상 파일 보관
         om = O.OrderManager(O.Broker(fk, allow_orders=True), clock=clk, sleep=clk.sleep, notify=notes.append, store=store)
         r = om.place_buys(PLAN, "본래")
-        om.stop_check({"084670": {"qty": 1, "sellable": 1, "cur_price": 1}}, {"084670": 2})
+        om.stop_check({"990006": {"qty": 1, "sellable": 1, "cur_price": 1}}, {"990006": 2})
         self.assertEqual(len(sends(fk)) + len(sends(fk, "kt10001")), 0)
         self.assertIn("손상", r[0]["skipped"])
         self.assertEqual(sum("주문 차단" in n for n in notes), 1)
@@ -68,11 +68,11 @@ class Orders(unittest.TestCase):
         # 흔적 없음 + 잔고 그대로 -> 2분 뒤 NOT_SENT, 다음 분 손절 다시 보냄
         clk, notes = FakeClock("2026-10-26 10:00:00"), []
         fk = FakeKiwoom(clk)
-        fk.balance_rows = [bal_row("084670", 28)]
+        fk.balance_rows = [bal_row("990006", 28)]
         fk.script["kt10001"] = ["timeout", "accept"]
         om = O.OrderManager(O.Broker(fk, allow_orders=True), clock=clk, sleep=clk.sleep, notify=notes.append)
-        held = {"084670": {"qty": 28, "sellable": 28, "cur_price": 29000}}
-        r = om.stop_check(held, {"084670": 30000})[0]
+        held = {"990006": {"qty": 28, "sellable": 28, "cur_price": 29000}}
+        r = om.stop_check(held, {"990006": 30000})[0]
         self.assertEqual(r["status"], O.UNKNOWN)
         for sec in (5, 30, 120):
             clk.t = pd.Timestamp("2026-10-26 10:00:00") + pd.Timedelta(seconds=sec)
@@ -80,34 +80,34 @@ class Orders(unittest.TestCase):
         self.assertEqual(r["status"], O.NOT_SENT)
         self.assertTrue(r["resendable"])
         clk.t = pd.Timestamp("2026-10-26 10:03:00")
-        om.stop_check(acct_view(fk, held), {"084670": 30000})
+        om.stop_check(acct_view(fk, held), {"990006": 30000})
         self.assertEqual(len(sends(fk, "kt10001")), 2)
         # 흔적 있음 (잔고가 줄고 남은 10주는 걸린 매도로 매도 가능 0) -> 다시 보내지 않음 (11J 보완 3: 계좌 매도 가능 수량이 정답)
         clk2, notes2 = FakeClock("2026-10-26 10:00:00"), []
         fk2 = FakeKiwoom(clk2)
         fk2.script["kt10001"] = ["timeout"]
         om2 = O.OrderManager(O.Broker(fk2, allow_orders=True), clock=clk2, sleep=clk2.sleep, notify=notes2.append)
-        r2 = om2.stop_check(held, {"084670": 30000})[0]
-        fk2.balance_rows = [bal_row("084670", 10, sellable=0)]
+        r2 = om2.stop_check(held, {"990006": 30000})[0]
+        fk2.balance_rows = [bal_row("990006", 10, sellable=0)]
         for sec in (5, 30, 120):
             clk2.t = pd.Timestamp("2026-10-26 10:00:00") + pd.Timedelta(seconds=sec)
             om2.reconcile()
         self.assertEqual(r2["status"], O.UNKNOWN)
         clk2.t = pd.Timestamp("2026-10-26 10:03:00")
-        om2.stop_check(acct_view(fk2, held), {"084670": 30000})
+        om2.stop_check(acct_view(fk2, held), {"990006": 30000})
         self.assertEqual(len(sends(fk2, "kt10001")), 1)
         # 흔적 있음 (미체결 조회에 보임) -> ACCEPTED, 다시 보내지 않음
         clk3 = FakeClock("2026-10-26 10:00:00")
         fk3 = FakeKiwoom(clk3)
-        fk3.balance_rows = [bal_row("084670", 28)]
+        fk3.balance_rows = [bal_row("990006", 28)]
         fk3.script["kt10001"] = ["timeout_late:100"]
         om3 = O.OrderManager(O.Broker(fk3, allow_orders=True), clock=clk3, sleep=clk3.sleep)
-        r3 = om3.stop_check(held, {"084670": 30000})[0]
+        r3 = om3.stop_check(held, {"990006": 30000})[0]
         for sec in (5, 30, 120):
             clk3.t = pd.Timestamp("2026-10-26 10:00:00") + pd.Timedelta(seconds=sec)
             om3.reconcile()
         self.assertEqual(r3["status"], O.ACCEPTED)
-        om3.stop_check(acct_view(fk3, held), {"084670": 30000})
+        om3.stop_check(acct_view(fk3, held), {"990006": 30000})
         self.assertEqual(len(sends(fk3, "kt10001")), 1)
 
     def test_buy_unknown_not_resent_before_1535(self):
@@ -247,7 +247,7 @@ class ResidentRules(unittest.TestCase):
         res.watch, res.mismatch_seen = O.AccountWatch(notify=self.alerts.append), set()
         res.ctx = {"buy_allowed": True, "frozen": {"ok": True}, "prep": {"data": {"daily_up_to_date": True, "official_missing_dates": []}},
                    "data_version": "v1"}
-        res.day.set("live", {"plan": [{"code": "084670", "qty": 28, "limit_price": 33350, "skip": ""}], "kind": "본래"})
+        res.day.set("live", {"plan": [{"code": "990006", "qty": 28, "limit_price": 33350, "skip": ""}], "kind": "본래"})
         res.day.mark("prev_settle")
         res.day.mark("data_check")
         self.res = res
@@ -274,19 +274,19 @@ class ResidentRules(unittest.TestCase):
         R = self.R
         prev = os.path.join(self.tmp, "intents", "2026-10-23.json")
         os.makedirs(os.path.dirname(prev))
-        C.atomic_json(prev, [{"intent_id": "p1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "084670", "qty": 28, "status": "UNKNOWN"}])
+        C.atomic_json(prev, [{"intent_id": "p1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "990006", "qty": 28, "status": "UNKNOWN"}])
         S.Day(os.path.join(self.tmp, "2026-10-23.json"), pd.Timestamp("2026-10-23"), clock=self.clk).mark("ac_summary")  # after_close 없음
-        self.fk.balance_rows = [bal_row("084670", 28)]
+        self.fk.balance_rows = [bal_row("990006", 28)]
         r = self.res.prev_settle()
         self.assertEqual(r["settled"], 1)
         st = json.load(open(prev, encoding="utf-8"))
         self.assertEqual(st[0]["status"], O.ACCEPTED)                   # 계좌에 생겼으니 체결된 것으로
-        self.assertEqual(json.load(open(R.POSITIONS, encoding="utf-8"))["held"]["084670"]["qty"], 28)
+        self.assertEqual(json.load(open(R.POSITIONS, encoding="utf-8"))["held"]["990006"]["qty"], 28)
         self.assertTrue(S.Day(os.path.join(self.tmp, "2026-10-23.json"), pd.Timestamp("2026-10-23")).done("after_close"))
 
     def test_b3_holding_mismatch_blocks_buy(self):
-        C.atomic_json(self.R.POSITIONS, {"held": {"084670": {"qty": 10, "stop_price": 1}}, "next_open_sells": []})
-        self.fk.balance_rows = [bal_row("084670", 10), bal_row("005930", 3)]   # 11K 보완 3: 보유 종목 수량 변화는 그 종목만 수동 확인, 장부에 없는 종목은 보유 불일치
+        C.atomic_json(self.R.POSITIONS, {"held": {"990006": {"qty": 10, "stop_price": 1}}, "next_open_sells": []})
+        self.fk.balance_rows = [bal_row("990006", 10), bal_row("005930", 3)]   # 11K 보완 3: 보유 종목 수량 변화는 그 종목만 수동 확인, 장부에 없는 종목은 보유 불일치
         self.clk.at("10:00:00")
         self.res.ctx["quote_caller"] = None
         self.res.stop_minute = self.res.stop_minute  # 시세 대신 고정 값
@@ -326,7 +326,7 @@ class ResidentRules(unittest.TestCase):
         self.assertTrue(any("시간대 오류" in a for a in self.alerts))
 
     def test_f01_trend_sell_skips_code_not_in_account(self):
-        C.atomic_json(self.R.POSITIONS, {"held": {"084670": {"qty": 10, "trend_sell_next_open": True}}, "next_open_sells": []})
+        C.atomic_json(self.R.POSITIONS, {"held": {"990006": {"qty": 10, "trend_sell_next_open": True}}, "next_open_sells": []})
         self.fk.balance_rows = []
         self.clk.at("08:31:00")
         self.res.trend_sell()

@@ -23,7 +23,7 @@ import orders as O  # noqa: E402
 import settings  # noqa: E402
 
 LIMITS = json.load(open(settings.EXAMPLE, encoding="utf-8"))["rate_limits"]
-PLAN3 = [dict(PLAN[0], code=c) for c in ("990001", "990002", "084670")]
+PLAN3 = [dict(PLAN[0], code=c) for c in ("990001", "990002", "990006")]
 
 
 def real_client(fk, clk, token_delay=0.0):

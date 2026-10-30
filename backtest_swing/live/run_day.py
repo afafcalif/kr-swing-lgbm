@@ -74,7 +74,7 @@ def snap_anomalies(snap, raw=None, day=None):
     lim = {}
     if raw is not None and "stk_cd" in raw and "upl_pric" in raw and "lst_pric" in raw:
         lim = {code_of(c): (num(u), num(lo)) for c, u, lo in zip(raw.stk_cd, raw.upl_pric, raw.lst_pric)}
-    out = {}
+    out, bases = {}, base_prices(raw)
     for r in snap.itertuples():
         if not (r.volume > 0):
             continue
@@ -85,13 +85,33 @@ def snap_anomalies(snap, raw=None, day=None):
         up, lo = lim.get(r.code, (float("nan"), float("nan")))
         if up > 0 and lo > 0 and (max(px) > up or min(px) < lo):
             out[r.code] = f"가격이 상·하한 범위 밖 (하한 {lo:.0f}, 상한 {up:.0f}, 가격 {min(px):.0f} ~ {max(px):.0f})"
+            continue
+        if bases is not None:  # 11Q A: 응답에 기준가 열이 있는데 이 종목 기준가가 없거나 0 이하·상하한 밖 = 그날 계수를 정할 수 없음
+            b = bases.get(r.code, float("nan"))
+            if not (np.isfinite(b) and b > 0) or (up > 0 and lo > 0 and not (lo < b < up)):
+                out[r.code] = f"기준가 없음·비정상 ({b}, 하한 {lo}, 상한 {up})"
     return out
 
 
+def base_prices(raw):
+    """11Q A: 스냅샷 응답 원문의 기준가 {code: float}. 응답에 base_pric 열이 없으면(예전 기록·시험) None = 기준가를 쓰지 않음 (예전과 같음)"""
+    if raw is None or "stk_cd" not in raw or "base_pric" not in raw:
+        return None
+    from orders import code_of, num
+    return {code_of(c): num(b) for c, b in zip(raw.stk_cd, raw.base_pric)}
+
+
 def snap_rows(snap, raw=None, day=None):
-    """계산 입력: 거래량 > 0 이고 데이터 이상(snap_anomalies, day 를 주면 오늘 것이 아닌 시세 포함)이 아닌 종목"""
+    """계산 입력: 거래량 > 0 이고 데이터 이상(snap_anomalies, day 를 주면 오늘 것이 아닌 시세 포함)이 아닌 종목.
+    11Q A: 응답에 기준가가 있으면 행에 base(그날 기준가)·prev_day(직전 거래일)를 같이 넘겨 작업 프로세스가 그날 이벤트 계수를 정한다 (engine.default_factor)"""
     bad = snap_anomalies(snap, raw, day)
-    return {r.code: ({"open": r.open, "high": r.high, "low": r.low, "close": r.close, "volume": r.volume, "amount": r.amount}, None, None)
+    bases = base_prices(raw)
+    extra = {}
+    if bases is not None and day is not None:
+        import state as S
+        extra["prev_day"] = str(S.prev_trading_day(pd.Timestamp(day)).date())
+    return {r.code: ({"open": r.open, "high": r.high, "low": r.low, "close": r.close, "volume": r.volume, "amount": r.amount,
+                      **({"base": bases.get(r.code), **extra} if bases is not None else {})}, None, None)
             for r in snap.itertuples() if r.volume > 0 and r.close > 0 and r.open > 0 and r.code not in bad}
 
 
@@ -103,7 +123,9 @@ def prepare(day, ledger_path=None):
     b, cols, meta, chk = M.load(mo)
     t_model = time.time() - t0
     index = index_series()
-    up_path = data_file("update.json", APPEND_DIR)  # 확인 리뷰 15: 현재 버전 폴더
+    import common as C
+    vdir = C.data_dir(APPEND_DIR)  # 11S: 한 버전 폴더를 정해 update.json·작업 프로세스 적재 모두 그 폴더에서 (장중 재수집이 새 버전을 내도 섞이지 않게)
+    up_path = os.path.join(vdir, "update.json")  # 확인 리뷰 15: 현재 버전 폴더
     upd = json.load(open(up_path, encoding="utf-8")) if os.path.exists(up_path) else {}
     prev_day = index["kospi"].index[index["kospi"].index < day].max()
     # 공식 시세가 없어 마지막 날을 빼면 지수도 짧아지므로, 실제 마지막 거래일은 update.json 값 (없으면 지수 기준)
@@ -116,8 +138,12 @@ def prepare(day, ledger_path=None):
     exp_prev = S.prev_trading_day(day)
     last_date = (upd.get("dates") or [None])[-1]
     t1 = time.time()
-    pool = E.ShardPool(sd.universe_codes(), n=12, use_append=True)
-    lj, lver = ledger_read(ledger_path or LEDGER)  # 읽은 장부 경로·버전 = 쓸 때 경로·확인 버전 (2026-10-24 F-06·F-07)
+    pool = E.ShardPool(sd.universe_codes(), use_append=True, vdir=vdir)
+    try:
+        lj, lver = ledger_read(ledger_path or LEDGER)  # 읽은 장부 경로·버전 = 쓸 때 경로·확인 버전 (2026-10-24 F-06·F-07)
+    except BaseException:
+        pool.close()  # 11O: 만든 묶음을 돌려주지 못하면 여기서 닫는다 (작업 프로세스가 남지 않게)
+        raise
     ledgers = {n: lj[n] for n in NAMES}
     info = {"model": {"month": mo, "check": chk, "retrain_day": meta["retrain_day"], "train_end": meta["train_end"]},
             "data": {"prev_trading_day": str(prev_day.date()), "append_dates": upd.get("dates"), "append_run": upd.get("run"),
@@ -125,9 +151,11 @@ def prepare(day, ledger_path=None):
                      "expected_prev_trading_day": str(exp_prev.date()), "data_last_date": last_date,
                      "daily_up_to_date": bool(last_date == str(exp_prev.date()) == str(prev_day.date())),
                      "official_prev_day": (upd.get("official_received") or {}).get(str(prev_day.date())) or "못 받음",
-                     "official_missing_dates": upd.get("official_missing_dates", []), "data_version": upd.get("data_version")},
+                     "official_missing_dates": upd.get("official_missing_dates", []), "data_version": upd.get("data_version"),
+                     "version_dir": os.path.basename(vdir) if os.path.basename(os.path.dirname(vdir)) == "versions" else None},
             "ledger_as_of": lj.get("as_of"), "ledger_version": lver, "ledger_path": ledger_path or LEDGER,
-            "prep_seconds": {"model_load_check": round(t_model, 2), "daily_to_memory": round(time.time() - t1, 1)}}
+            "prep_seconds": {"model_load_check": round(t_model, 2), "daily_to_memory": round(time.time() - t1, 1)},
+            "pool": {"workers": getattr(pool, "n", None), "openblas_threads": os.environ.get("OPENBLAS_NUM_THREADS")}}
     return pool, b, cols, index, ledgers, info
 
 
@@ -267,12 +295,32 @@ def rerun(date, suffix="", out=""):
     full = pd.read_parquet(log["live"]["snapshot"]["file"])
     snap = pd.DataFrame({c[2:]: full[c] for c in full.columns if c.startswith("p_")})
     rows = snap_rows(snap, full, day)
+    # 11S: 그날 15:18 에 쓴 데이터 버전 (고정 버전 이름, 없으면 data_version 이 같은 폴더).
+    # 11S 보완 2: 그날 버전 기록이 있는데 폴더가 없으면 지금 버전으로 대신하지 않고 '대조 미완료' (상위 3 비교 안 함 = 불일치 차단 아님).
+    # 버전 기록이 없는 예전 로그만 지금 버전
+    want = log.get("data_dir_version") or log.get("data_version")
+    vdir = C.version_dir(log.get("data_dir_version"), log.get("data_version"), APPEND_DIR)
+    if want and not vdir:
+        rr = {"incomplete": f"그날 데이터 버전 {want} 폴더 없음 -> 동결 대조 안 함 (지금 버전으로 대신하지 않음)", "run": now().strftime("%H:%M:%S"),
+              "data_dir": None}
+        if out:
+            jdump(out, {"rerun": rr, "errors_add": []})
+            return
+        log["rerun"] = rr
+        jdump(path, log)
+        return
+    saved_dd = C.data_dir
+    if vdir:
+        C.data_dir = lambda append_dir=None: vdir
     # 동결 load_stock·market_features 를 그대로 부른다 (임시 폴더 파일, 폴더·경로 상수만 바꿈). 실시간은 메모리 사본 (EXEC_SPEC 0장 예외)
-    pool = E.ShardPool(sd.universe_codes(), n=12, use_append=True, frozen=True)
     try:
-        res = E.run_day(pool, day, rows, index_series(), log["live"]["index_values"], b, cols, log["ledger_before"], frozen_market=True)
+        pool = E.ShardPool(sd.universe_codes(), use_append=True, frozen=True, **({"vdir": vdir} if vdir else {}))
+        try:
+            res = E.run_day(pool, day, rows, index_series(), log["live"]["index_values"], b, cols, log["ledger_before"], frozen_market=True)
+        finally:
+            pool.close()
     finally:
-        pool.close()
+        C.data_dir = saved_dd
     # B7: 상위 3 뿐 아니라 대상 전 종목 점수 최대 차이, factor·vscale 기본값 대체 종목 수
     sf = log["live"].get("scores_file") or os.path.join(LOG_DIR, "scores", f"{day.date()}{suffix}.parquet")
     score_all = None
@@ -285,7 +333,8 @@ def rerun(date, suffix="", out=""):
                      "max_abs_diff": float((a[common_] - b_[common_]).abs().max()) if len(common_) else None}
     log["rerun"] = {"eligible_n": len(res["eligible"]), "model_check": chk["ok"], "run": now().strftime("%H:%M:%S"),
                     "score_all": score_all, "factor_default_n": res.get("factor_default_n"), "vscale_default_n": res.get("vscale_default_n"),
-                    "method": "동결 stage3_data.load_stock·stage4_features.market_features 를 그대로 호출 (임시 파일), 장부 상태 = 실행 엔진과 같음"}
+                    "method": "동결 stage3_data.load_stock·stage4_features.market_features 를 그대로 호출 (임시 파일), 장부 상태 = 실행 엔진과 같음",
+                    "data_dir": os.path.basename(vdir) if vdir else "지금 버전 (그날 버전 기록 없는 예전 로그)"}
     errs = []
     for n in NAMES:
         top = res["ledgers"][n]["top3"]

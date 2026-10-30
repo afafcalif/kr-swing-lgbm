@@ -18,6 +18,10 @@ import sys
 import threading
 import time
 
+# 11O: OpenBLAS(numpy·scipy 에 들어 있음)는 불러올 때 CPU 스레드 수만큼 버퍼를 잡아 프로세스마다 커밋 약 0.5~1GB (작업 프로세스 12개 = 수 GB).
+# 계산은 BLAS 를 쓰지 않으므로 1 스레드로 (결과 같음, 2026-10-23 스냅샷 전 특징·점수 차이 0). 이 뒤에 띄우는 자식 프로세스(작업 프로세스·rerun)가 물려받는다
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 import numpy as np
 import pandas as pd
 
@@ -74,8 +78,15 @@ def today_frames(adj, raw, day, sv, f, vscale):
     return a, r
 
 
-def default_factor(adj, raw, day, flags=None):
-    """오늘 행의 factor·vscale: 전날 행 값 (빈칸이면 1). flags 를 주면 기본값 1.0 으로 대체했는지 기록 (2026-10-24 B7)"""
+BASE_EVENT = 0.005  # 11Q A: 기준가 / 전날 원주가 종가 가 이만큼(0.5%) 넘게 다르면 그날 이벤트 (그 아래는 스팩류 기준가 미세 조정 = 키움도 계수 안 바꿈)
+
+
+def default_factor(adj, raw, day, flags=None, base=None, prev_day=None):
+    """오늘 행의 factor·vscale: 전날 행 값 (빈칸이면 1). flags 를 주면 기본값 1.0 으로 대체했는지 기록 (2026-10-24 B7).
+    11Q A: base(그날 기준가, 15:18 스냅샷)가 있고 저장 이력 마지막 행이 prev_day(직전 거래일)이면, k = 기준가 / 그 행 원주가 종가 가
+    BASE_EVENT 넘게 1 과 다를 때(분할·병합·권리락 등 그날 이벤트) 오늘 factor = 전날 factor / k, vscale = 전날 vscale x k
+    (키움 수정주가 계수 변화 = 기준가 / 전날 종가, 2025-03 ~ 2026-10 643건 0.1% 안). 저장 이력이 이벤트 전 기준이면 오늘 행을 그 기준으로,
+    이미 새 기준(이전 행 factor = k)이면 오늘 factor 1 이 된다. 평소(차이 0.5% 미만·기준가 없음)는 예전과 같은 값"""
     r = raw[raw.timestamp < day]
     a = adj[adj.timestamp < day]
     f_ok = bool(len(r) and pd.notna(r.factor.iat[-1]))
@@ -85,6 +96,19 @@ def default_factor(adj, raw, day, flags=None):
     vs = float(a.volume.iat[-1]) / rv if vs_ok else 1.0
     if flags is not None:
         flags["factor_default"], flags["vscale_default"] = not f_ok, not vs_ok
+    if base is not None and len(r):
+        pc = float(r.close.iat[-1])
+        b = float(base)
+        if np.isfinite(b) and b > 0 and pc > 0 and abs(b / pc - 1) >= BASE_EVENT:
+            if prev_day is not None and pd.Timestamp(r.timestamp.iat[-1]) != pd.Timestamp(prev_day):
+                if flags is not None:  # 이력 마지막 행이 직전 거래일이 아니면 기준가와 비교할 전날 종가를 모름 -> 예전 값, 기록만
+                    flags["base_stale"] = str(pd.Timestamp(r.timestamp.iat[-1]).date())
+            else:
+                k = b / pc
+                # 전날 거래량 0(이벤트 앞 거래정지 등)이면 vscale 기본값 1 대신 1 / 전날 factor (키움은 이벤트마다 거래량도 1/계수로 조정 -> vscale = 1/factor)
+                f, vs = f / k, (vs if vs_ok else 1.0 / f) * k
+                if flags is not None:
+                    flags["base_k"] = k
     return f, vs
 
 
@@ -127,15 +151,29 @@ def make_load_frozen(tmp):
     return load
 
 
-def _loop(conn, codes, use_append, frozen=False):
+def _loop(conn, codes, use_append, frozen=False, vdir=None):
+    if vdir:  # 11S: 데이터 버전 폴더 고정 (spawn 이라 부모의 고정이 넘어오지 않음, 실행 중 CURRENT.json 이 바뀌어도 그대로)
+        import common
+        common.data_dir = lambda append_dir=None: vdir
     from daily import Store
     store = Store(codes, use_append=use_append)
     cur = {}
+    tmp = None
     if frozen:
-        lf = make_load_frozen(os.path.join(os.environ.get("TEMP", "."), "live_frozen", str(os.getpid())))
+        tmp = os.path.join(os.environ.get("TEMP", "."), "live_frozen", str(os.getpid()))
+        lf = make_load_frozen(tmp)
         load_mem = lambda code, until: lf(code, until, cur[code])  # noqa: E731
     else:
         load_mem = make_load_mem(lambda code: cur[code])
+    try:
+        _serve(conn, codes, store, cur, load_mem)
+    finally:
+        if tmp is not None:  # 11O: 정상 종료(stop·부모 없어짐)면 임시 폴더 지움 (강제 종료로 남은 것은 다음 동결 묶음이 sweep_frozen_tmp 로)
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _serve(conn, codes, store, cur, load_mem):
     conn.send(("ready", len(store.adj), store.excluded))
     while True:
         try:
@@ -162,8 +200,8 @@ def _loop(conn, codes, use_append, frozen=False):
                 if row is not None:
                     sv, f, vs = row
                     flags = {}
-                    if f is None:
-                        f, vs = default_factor(adj, raw, day, flags)
+                    if f is None:  # 11Q A: 스냅샷 기준가(sv base)로 그날 이벤트 계수
+                        f, vs = default_factor(adj, raw, day, flags, base=sv.get("base"), prev_day=sv.get("prev_day"))
                 else:
                     sv, f, vs = None, None, None
                 cur[code] = today_frames(adj, raw, day, sv, f, vs)
@@ -179,6 +217,7 @@ def _loop(conn, codes, use_append, frozen=False):
                             "close_adj": float(cut.close.iat[-1]), "raw_close": float(cut.raw_close.iat[-1]),
                             "factor": float(cut.factor.iat[-1]), "factor_default": bool(flags.get("factor_default")) if row is not None else False,
                             "vscale_default": bool(flags.get("vscale_default")) if row is not None else False,
+                            "base_k": flags.get("base_k") if row is not None else None, "base_stale": flags.get("base_stale") if row is not None else None,
                             **{c: float(feats[c]) for c in feats.index}})
             except Exception as e:  # noqa: BLE001
                 errs.append((code, repr(e)[:200]))
@@ -191,13 +230,55 @@ class PoolError(Exception):
     """작업 프로세스가 죽었거나 제한 시간 안에 답하지 않음 (Codex 22). 그날 신규 매수만 막고 메인 루프는 계속"""
 
 
+POOL_WORKERS_DEFAULT = 6  # 11O: config pool_workers 가 없을 때 (7500F 물리 코어 수)
+
+
+def pool_workers(cfg=None):
+    """11O: 작업 프로세스 수 = config pool_workers (없으면 6), 1 ~ CPU 스레드 수로 자름. 상주 적재·장후 rerun·features_eod 가 같은 값"""
+    if cfg is None:
+        import settings
+        cfg = settings.load()
+    try:
+        n = int(cfg.get("pool_workers") or POOL_WORKERS_DEFAULT)
+    except (TypeError, ValueError):
+        n = POOL_WORKERS_DEFAULT
+    return max(1, min(n, os.cpu_count() or n))
+
+
+def sweep_frozen_tmp(root=None, max_age_s=6 * 3600):
+    """11O: 동결 대조 작업 프로세스의 임시 폴더(%TEMP%/live_frozen/{pid}) 중 오래된 것 지움 (예전에는 하루 n개씩 남았음). 반환: 지운 수"""
+    import shutil
+    root = root or os.path.join(os.environ.get("TEMP", "."), "live_frozen")
+    n = 0
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return 0
+    for name in names:
+        p = os.path.join(root, name)
+        if not name.isdigit() or not os.path.isdir(p):
+            continue
+        try:
+            if time.time() - os.path.getmtime(p) > max_age_s:
+                shutil.rmtree(p, ignore_errors=True)
+                n += 1
+        except OSError:
+            pass
+    return n
+
+
 class ShardPool:
     """종목을 n 묶음으로 나눈 작업 프로세스 (장 전에 일봉을 메모리에 올림).
-    Codex 22: 부모의 쓰지 않는 파이프 끝(자식 쪽)은 시작 직후 닫고, 응답은 poll(timeout) + 자식 생존 확인으로 받는다."""
+    Codex 22: 부모의 쓰지 않는 파이프 끝(자식 쪽)은 시작 직후 닫고, 응답은 poll(timeout) + 자식 생존 확인으로 받는다.
+    11O: n 을 안 주면 pool_workers() (config pool_workers). 11S: vdir 를 주면 작업 프로세스가 그 데이터 버전 폴더만 읽음"""
 
-    def __init__(self, codes, n=12, use_append=True, frozen=False, start_timeout=600, call_timeout=180):
+    def __init__(self, codes, n=None, use_append=True, frozen=False, start_timeout=600, call_timeout=180, vdir=None):
         ctx = mp.get_context("spawn")
+        n = pool_workers() if n is None else n
+        self.n = n
         self.lock = threading.RLock()  # 11I: 장 마감 후 계산 스레드와 주 반복이 같이 써도 요청·응답 한 쌍씩 (파이프가 섞이지 않게)
+        if frozen:
+            sweep_frozen_tmp()
         self.shards = [codes[i::n] for i in range(n)]
         self.conns, self.procs = [], []
         self.call_timeout = call_timeout
@@ -205,7 +286,7 @@ class ShardPool:
         try:
             for sh in self.shards:
                 a, b = ctx.Pipe()
-                p = ctx.Process(target=_loop, args=(b, sh, use_append, frozen), daemon=True)
+                p = ctx.Process(target=_loop, args=(b, sh, use_append, frozen) + ((vdir,) if vdir else ()), daemon=True)
                 p.start()
                 b.close()  # 부모는 자식 쪽 끝을 쓰지 않는다 (자식이 죽으면 recv 가 EOFError 로 끝나게)
                 self.conns.append(a)
@@ -472,7 +553,11 @@ def run_day(pool, day, rows, index, index_values, boosters, cols, ledger, frozen
     first = per[next(iter(per))]
     fd = int(fr.factor_default.sum()) if "factor_default" in fr else 0
     vd = int(fr.vscale_default.sum()) if "vscale_default" in fr else 0
+    # 11Q A: 기준가로 계수를 바꾼 종목 {code: k}·이력이 직전 거래일까지 없어 못 비교한 종목
+    bev = {r.code: round(float(r.base_k), 6) for r in fr.itertuples() if "base_k" in fr and pd.notna(r.base_k)} if len(fr) else {}
+    bst = {r.code: r.base_stale for r in fr.itertuples() if "base_stale" in fr and isinstance(r.base_stale, str)} if len(fr) else {}
     return {"day": day, "frame": fr, "eligible": e, "ledgers": per, **first, "factor_default_n": fd, "vscale_default_n": vd,
+            "base_events": bev, "base_stale": bst,
             "filter": filt, "market": {k: float(v) for k, v in mrow.items()}, "index_values": index_values,
             "errors": errs, "n_rows": len(rows), "seconds_compute": round(t1 - t0, 2), "seconds_total": round(time.time() - t0, 2)}
 

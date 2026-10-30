@@ -21,28 +21,28 @@ import orders as O  # noqa: E402
 import positions as P  # noqa: E402
 import state as S  # noqa: E402
 
-BASE_TRADE = {"qty": 28, "trade_id": "084670-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 30000.0, "kind": "본래"}
+BASE_TRADE = {"qty": 28, "trade_id": "990006-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 30000.0, "kind": "본래"}
 
 
 class Ambiguous(Base):
     """R1·R3: 복구가 애매하면 추측해서 확정하지 않는다 (미확정, 손절가는 후보 중 높은 쪽, 신규 매수 차단, 알림)"""
 
     def setup_day(self, intents, positions_flag=True):
-        """10-23: 시작 보유 084670 28주 (손절가 30000). 지금 계좌 28주 평균 33000 -> 새 거래 임시 손절가 = 33000 - 850 = 32150"""
-        day_state(self.tmp, "2026-10-23", self.clk, steps=("settle", "ac_summary"), positions_start={"held": {"084670": 28}},
-                  positions_baseline={"held": {"084670": dict(BASE_TRADE)}, "trade_seq": 1})
+        """10-23: 시작 보유 990006 28주 (손절가 30000). 지금 계좌 28주 평균 33000 -> 새 거래 임시 손절가 = 33000 - 850 = 32150"""
+        day_state(self.tmp, "2026-10-23", self.clk, steps=("settle", "ac_summary"), positions_start={"held": {"990006": 28}},
+                  positions_baseline={"held": {"990006": dict(BASE_TRADE)}, "trade_seq": 1})
         intents_file(self.tmp, "2026-10-23", intents)
         held = dict(BASE_TRADE)
         if positions_flag:
             held.update(info_pending=True, pending_since="2026-10-23")
-        P.save(self.R.POSITIONS, {"held": {"084670": held}, "next_open_sells": {}, "trade_seq": 1})
-        self.fk.balance_rows = [bal_row("084670", 28, avg=33000)]
+        P.save(self.R.POSITIONS, {"held": {"990006": held}, "next_open_sells": {}, "trade_seq": 1})
+        self.fk.balance_rows = [bal_row("990006", 28, avg=33000)]
         res = self.started("07:10:00")
         res.day.s["steps"].pop("prev_settle")
         return res
 
     def assert_ambiguous(self, res):
-        p = jl(self.R.POSITIONS)["held"]["084670"]
+        p = jl(self.R.POSITIONS)["held"]["990006"]
         self.assertEqual(p["qty"], 28)                                            # 수량은 계좌
         self.assertTrue(p["info_pending"] and p["ambiguous"])
         self.assertEqual(p["stop_price"], 32150.0)                                # 후보 30000 / 32150 중 높은 쪽
@@ -54,28 +54,28 @@ class Ambiguous(Base):
     # ---------------------------------------------------------------- R1
     def test_R1_two_unknown_same_code_left_unconfirmed(self):
         res = self.setup_day([
-            {"intent_id": "s1", "date": "2026-10-23", "stage": "stop", "side": "sell", "code": "084670", "qty": 28, "trde_tp": "3",
+            {"intent_id": "s1", "date": "2026-10-23", "stage": "stop", "side": "sell", "code": "990006", "qty": 28, "trde_tp": "3",
              "status": "UNKNOWN", "pre_qty": 28, "held_qty_before": 28, "kind": "본래"},
-            {"intent_id": "b1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "084670", "qty": 28, "trde_tp": "0",
+            {"intent_id": "b1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "990006", "qty": 28, "trde_tp": "0",
              "status": "UNKNOWN", "pre_qty": 28, "kind": "점검용"}], positions_flag=False)
         r = res.prev_settle()
         st = {i["intent_id"]: i for i in jl(os.path.join(self.tmp, "intents", "2026-10-23.json"))}
         self.assertEqual((st["s1"]["status"], st["b1"]["status"]), (O.UNKNOWN, O.UNKNOWN))   # 잔고 28 = 28 로 둘 다 NOT_SENT 라고 하지 않음
         self.assertIn("R1", st["s1"]["recovery_note"])
-        self.assertEqual((r["settled"], r["ambiguous"]), (0, ["084670"]))
+        self.assertEqual((r["settled"], r["ambiguous"]), (0, ["990006"]))
         self.assert_ambiguous(res)
         # 준비 뒤 마무리가 미확정 손절가를 공식 일봉 손절가로 낮추지 않는다
-        self.judged["084670"] = {"stop": 20000.0, "trend": False, "close": 33000.0, "basis": "x"}
+        self.judged["990006"] = {"stop": 20000.0, "trend": False, "close": 33000.0, "basis": "x"}
         res.finalize_recovery()
-        self.assertEqual(jl(self.R.POSITIONS)["held"]["084670"]["stop_price"], 32150.0)
+        self.assertEqual(jl(self.R.POSITIONS)["held"]["990006"]["stop_price"], 32150.0)
         # 다음 날 아침 복구도 사람이 고치기 전에는 그대로 (표시를 지우지 않음)
         res2 = self.started("07:20:00")
         res2.day.s["steps"].pop("prev_settle")
         res2.prev_settle()
-        self.assertTrue(jl(self.R.POSITIONS)["held"]["084670"]["ambiguous"])
+        self.assertTrue(jl(self.R.POSITIONS)["held"]["990006"]["ambiguous"])
 
     def test_R1_single_unknown_still_settled_by_balance(self):
-        res = self.setup_day([{"intent_id": "s1", "date": "2026-10-23", "stage": "stop", "side": "sell", "code": "084670", "qty": 28,
+        res = self.setup_day([{"intent_id": "s1", "date": "2026-10-23", "stage": "stop", "side": "sell", "code": "990006", "qty": 28,
                                "trde_tp": "3", "status": "UNKNOWN", "pre_qty": 28, "kind": "본래"}], positions_flag=False)
         self.fk.balance_rows = []
         r = res.prev_settle()
@@ -86,10 +86,10 @@ class Ambiguous(Base):
         def run(with_buy):
             clk = FakeClock("2026-10-26 15:19:00")
             fk = FakeKiwoom(clk)
-            fk.balance_rows = [bal_row("084670", 28)]
+            fk.balance_rows = [bal_row("990006", 28)]
             om = O.OrderManager(O.Broker(fk, allow_orders=True), clock=clk, sleep=clk.sleep)
             fk.script["kt10001"] = ["timeout"]
-            om.stop_check({"084670": {"qty": 28, "sellable": 28, "cur_price": 100.0}}, {"084670": 200.0})
+            om.stop_check({"990006": {"qty": 28, "sellable": 28, "cur_price": 100.0}}, {"990006": 200.0})
             if with_buy:
                 clk.at("15:21:05")
                 fk.script["kt10000"] = ["timeout"]
@@ -104,38 +104,38 @@ class Ambiguous(Base):
 
     # ---------------------------------------------------------------- R3
     def sell_buy(self, sell_qty, **fill):
-        return [{"intent_id": "s1", "date": "2026-10-23", "stage": "stop", "side": "sell", "code": "084670", "qty": sell_qty, "trde_tp": "3",
+        return [{"intent_id": "s1", "date": "2026-10-23", "stage": "stop", "side": "sell", "code": "990006", "qty": sell_qty, "trde_tp": "3",
                  "status": "ACCEPTED", "ord_no": "S1", "filled_qty": 0, "pre_qty": 28, "held_qty_before": 28, "kind": "본래", **fill},
-                {"intent_id": "b1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "084670", "qty": 28, "trde_tp": "0",
+                {"intent_id": "b1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "990006", "qty": 28, "trde_tp": "0",
                  "status": "ACCEPTED", "ord_no": "B1", "filled_qty": 28, "unfilled_qty": 0, "pre_qty": 0, "kind": "점검용"}]
 
     def test_R3_sold_10_of_28_keeps_start_trade(self):
         res = self.setup_day(self.sell_buy(28, filled_qty=10, unfilled_qty=18))
-        self.fk.balance_rows = [bal_row("084670", 46, avg=33000)]                # 28 - 10 + 28
+        self.fk.balance_rows = [bal_row("990006", 46, avg=33000)]                # 28 - 10 + 28
         r = res.prev_settle()
-        p = jl(self.R.POSITIONS)["held"]["084670"]
-        self.assertEqual((p["trade_id"], p["entry_date"], p["stop_price"], p["qty"]), ("084670-2026-10-20-1", "2026-10-20", 30000.0, 46))
+        p = jl(self.R.POSITIONS)["held"]["990006"]
+        self.assertEqual((p["trade_id"], p["entry_date"], p["stop_price"], p["qty"]), ("990006-2026-10-20-1", "2026-10-20", 30000.0, 46))
         self.assertFalse(p.get("info_pending") or p.get("ambiguous"))            # 요청 28 >= 시작 28 이어도 체결 10 이라 전량 매도 아님
         self.assertEqual(r["ambiguous"], [])
 
     def test_R3_full_fill_known_is_new_trade(self):
         res = self.setup_day(self.sell_buy(28, filled_qty=28, unfilled_qty=0))
         res.prev_settle()
-        p = jl(self.R.POSITIONS)["held"]["084670"]
+        p = jl(self.R.POSITIONS)["held"]["990006"]
         self.assertEqual((p["entry_date"], p["kind"]), ("2026-10-23", "점검용"))
         self.assertFalse(p.get("ambiguous"))
 
     def test_R3_fill_unknown_left_unconfirmed(self):
         res = self.setup_day(self.sell_buy(28))                                   # 매도 체결 수량 모름 (잔고로만 확정된 접수)
         r = res.prev_settle()
-        self.assertEqual(r["ambiguous"], ["084670"])
+        self.assertEqual(r["ambiguous"], ["990006"])
         p = self.assert_ambiguous(res)
-        self.assertEqual(p["trade_id"], "084670-2026-10-20-1")                   # 거래 정보는 시작 거래 그대로 두고 표시
+        self.assertEqual(p["trade_id"], "990006-2026-10-20-1")                   # 거래 정보는 시작 거래 그대로 두고 표시
 
     def test_R3_partial_sell_request_below_start_not_ambiguous(self):
         res = self.setup_day(self.sell_buy(10))                                   # 요청 10 < 시작 28: 체결 수량을 몰라도 전량 매도일 수 없음
         res.prev_settle()
-        self.assertFalse(jl(self.R.POSITIONS)["held"]["084670"].get("ambiguous"))
+        self.assertFalse(jl(self.R.POSITIONS)["held"]["990006"].get("ambiguous"))
 
 
 class StartSnapshot(Base):
@@ -162,10 +162,10 @@ class StartSnapshot(Base):
         self.assertEqual(res.day.s["positions_start_skipped"]["reason"], "그날 첫 시작이 아님")
 
     def test_R2_day_start_falls_back_to_previous_settlement(self):
-        day_state(self.tmp, "2026-10-22", self.clk, settlement={"account": {"084670": 28}})
+        day_state(self.tmp, "2026-10-22", self.clk, settlement={"account": {"990006": 28}})
         day_state(self.tmp, "2026-10-23", self.clk, steps=("settle",))           # 시작 보유·정산 기준 장부 없음
         res = self.started("07:10:00")
-        self.assertEqual(res.day_start_qty("2026-10-23"), {"084670": 28})
+        self.assertEqual(res.day_start_qty("2026-10-23"), {"990006": 28})
 
 
 class CloseCheck(Base):

@@ -26,9 +26,9 @@ import orders as O  # noqa: E402
 import positions as P  # noqa: E402
 
 LIVE = os.path.dirname(os.path.abspath(__file__))
-HELD = {"qty": 28, "trade_id": "084670-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 30000.0, "stop_temp": True,
+HELD = {"qty": 28, "trade_id": "990006-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 30000.0, "stop_temp": True,
         "stop_basis": "임시 (계좌 평균단가 - 1.7 x ATR20)", "kind": "본래", "judged_on": "2026-10-23", "judged_by": "15:30 1분봉"}
-FIX = {"prev": "2026-10-23", "stops": {"084670": {"stop": 27000.0, "basis": "진입일 2026-10-20 공식 일봉 종가 - 1.7 x ATR20"}},
+FIX = {"prev": "2026-10-23", "stops": {"990006": {"stop": 27000.0, "basis": "진입일 2026-10-20 공식 일봉 종가 - 1.7 x ATR20"}},
        "trend": {}, "left": [], "at": "08:58:00"}
 
 
@@ -37,7 +37,7 @@ def prep_out():
     return {"pool": pool(), "boosters": None, "cols": None, "index": {}, "ledgers": {}, "frozen": {"ok": True}, "amt20": {}, "excluded": {},
             "prep": {"model": {"check": {"ok": True}}, "ledger_version": 0,
                      "data": {"daily_up_to_date": True, "prev_trading_day": "2026-10-23", "data_version": "v"}},
-            "recovery": {**FIX, "stops": {c: dict(v) for c, v in FIX["stops"].items()}}, "official_judge": {"084670": {"close": 31000.0, "stop": 29000.0, "trend": False}, "_missing": []}}
+            "recovery": {**FIX, "stops": {c: dict(v) for c, v in FIX["stops"].items()}}, "official_judge": {"990006": {"close": 31000.0, "stop": 29000.0, "trend": False}, "_missing": []}}
 
 
 class TempStop(Base):
@@ -45,11 +45,11 @@ class TempStop(Base):
     임시 손절가로 만든 의무는 공식 손절가로 바로잡혔을 때 아직 안 보냈고 현재가 >= 공식 손절가면 해제"""
 
     def ready(self, hms, duty=None):
-        pos = {"held": {"084670": dict(HELD)}, "sell_duty": {"084670": duty} if duty else {}, "next_open_sells": {}, "trade_seq": 1,
+        pos = {"held": {"990006": dict(HELD)}, "sell_duty": {"990006": duty} if duty else {}, "next_open_sells": {}, "trade_seq": 1,
                "duty_format": P.DUTY_FORMAT}
         P.save(self.R.POSITIONS, pos)
-        self.fk.balance_rows = [bal_row("084670", 28)]
-        self.quotes["084670"] = 29000.0                                            # 임시 30000 아래, 공식 27000 위
+        self.fk.balance_rows = [bal_row("990006", 28)]
+        self.quotes["990006"] = 29000.0                                            # 임시 30000 아래, 공식 27000 위
         res = self.started(hms, live=False)
         res.day.set("prev_recovery", {"prev": "2026-10-23", "finalized": False})
         res.prep_thread, res.prep_result, res.prep_reason = object(), prep_out(), "하루 시작"
@@ -65,7 +65,7 @@ class TempStop(Base):
         self.assertLess(time.time() - t0, 2.0)
         self.assertEqual(sends(self.fk, "kt10001"), [])                           # 임시 손절가로 팔지 않음
         p = jl(self.R.POSITIONS)
-        self.assertEqual((p["held"]["084670"]["stop_price"], p["held"]["084670"]["stop_temp"], p["sell_duty"]), (27000.0, False, {}))
+        self.assertEqual((p["held"]["990006"]["stop_price"], p["held"]["990006"]["stop_temp"], p["sell_duty"]), (27000.0, False, {}))
         self.assertTrue(res.day.s["prev_recovery"]["finalized"])
         self.assertFalse([e for e in res.day.s.get("errors", []) if "계산" in str(e)])   # judge 를 주 스레드에서 부르지 않음
         self.assertEqual(res.day.s["official_vs_1530"]["checked"], 1)            # 공식 일봉 비교도 준비 스레드 값으로
@@ -75,13 +75,13 @@ class TempStop(Base):
         res = self.ready("09:05:00", duty=dict(duty))
         res.apply_recovery_fixes(res.prep_result["recovery"])
         self.assertEqual(jl(self.R.POSITIONS)["sell_duty"], {})                  # 보낸 주문 없음 + 현재가 >= 공식 -> 해제
-        self.assertTrue(any(a.startswith("[손절 의무 해제] 084670") for a in self.alerts))
+        self.assertTrue(any(a.startswith("[손절 의무 해제] 990006") for a in self.alerts))
         res2 = self.ready("09:06:00", duty=dict(duty))
-        it = res2.om.store.add(date="2026-10-26", stage="stop", side="sell", code="084670", qty=28, price=None, trde_tp="3", attempt=1,
+        it = res2.om.store.add(date="2026-10-26", stage="stop", side="sell", code="990006", qty=28, price=None, trde_tp="3", attempt=1,
                                kind="본래", reason="손절", assumed_kind="stop")
         res2.om.store.update(it, status=O.ACCEPTED, ord_no="S1")
         res2.apply_recovery_fixes(res2.prep_result["recovery"])
-        du = jl(self.R.POSITIONS)["sell_duty"]["084670"]                          # 보낸 주문은 그대로 -> 의무 유지
+        du = jl(self.R.POSITIONS)["sell_duty"]["990006"]                          # 보낸 주문은 그대로 -> 의무 유지
         self.assertEqual((du["stop"], du["stop_temp"]), (27000.0, False))
         self.assertIn("보낸 주문 있음", du["reason"])
 
@@ -146,7 +146,7 @@ class ExpiredToken(Base):
         self.assertEqual([i["status"] for i in buys], [O.NOT_SENT, O.NOT_SENT, O.NOT_SENT, O.ACCEPTED])
         self.assertEqual([i.get("not_sent_kind") for i in buys[:3]], ["auth"] * 3)
         self.assertEqual(buys[-1]["created"][:5], "15:24")                        # 15:24 매수 성공
-        self.assertEqual(res.om.store.rejected_count("2026-10-26", "084670", "buy"), 0)   # 거부 횟수에 안 셈 (최대 2회 상한과 무관)
+        self.assertEqual(res.om.store.rejected_count("2026-10-26", "990006", "buy"), 0)   # 거부 횟수에 안 셈 (최대 2회 상한과 무관)
         self.assertEqual(len(sends(self.fk)), 1)
         self.assertEqual(sum(a.startswith("[주문 보내지 않음] 인증·토큰") for a in self.alerts), 3)
 
@@ -183,10 +183,10 @@ class AlertLockHeld(Base):
         p = subprocess.Popen([sys.executable, "-c", code], cwd=self.tmp)
         self.assertTrue(wait_for(lambda: os.path.exists(held), timeout=60))     # 다른 프로세스가 잠금을 잡을 때까지
         duty = O.new_duty("stop", "2026-10-26 15:10:00", "현재가 29000 < 손절가 30000", price=29000.0, stop=30000.0)
-        pos = {"held": {"084670": dict(HELD, stop_temp=False), "005930": dict(HELD, trade_id="005930-2026-10-20-2", stop_temp=False)},
-               "sell_duty": {"084670": dict(duty), "005930": dict(duty)}, "next_open_sells": {}, "trade_seq": 2, "duty_format": P.DUTY_FORMAT}
+        pos = {"held": {"990006": dict(HELD, stop_temp=False), "005930": dict(HELD, trade_id="005930-2026-10-20-2", stop_temp=False)},
+               "sell_duty": {"990006": dict(duty), "005930": dict(duty)}, "next_open_sells": {}, "trade_seq": 2, "duty_format": P.DUTY_FORMAT}
         P.save(self.R.POSITIONS, pos)
-        self.fk.balance_rows = [bal_row("084670", 28), bal_row("005930", 28)]
+        self.fk.balance_rows = [bal_row("990006", 28), bal_row("005930", 28)]
         self.fk.script["kt10001"] = ["reject", "accept"]                          # 첫 매도 거부 -> "[주문 거부]" 알림
         res = self.started("15:28:50", live=False)
         t0 = time.time()

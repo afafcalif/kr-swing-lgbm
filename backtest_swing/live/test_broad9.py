@@ -32,72 +32,72 @@ def intent(code, side, status, day="2026-10-23", **kw):
 
 class QtyReview(Base6):
     def review(self):
-        return jl(self.R.POSITIONS)["held"]["084670"].get("qty_review")
+        return jl(self.R.POSITIONS)["held"]["990006"].get("qty_review")
 
     def test_normal_buy_then_1540_interrupted_not_review(self):
         """10-23 매수 28 체결, 15:40 보유 갱신이 기준 장부만 저장하고 꺼짐 (positions.json 은 28, 맞춘 날 10-22) -> 아침 계좌 56 은 매수로 설명"""
-        d = self.prev_state(steps=("snapshot", "settle"), intents=[intent("084670", "buy", O.ACCEPTED, filled_qty=28, fill_price=33000, pre_qty=28)],
-                            settlement={"d2": 30_000_000.0, "account": {"084670": 56}})
-        d.set("positions_baseline", {"held": {"084670": dict(HELD)}, "trade_seq": 1, "time": "15:40:10"})
+        d = self.prev_state(steps=("snapshot", "settle"), intents=[intent("990006", "buy", O.ACCEPTED, filled_qty=28, fill_price=33000, pre_qty=28)],
+                            settlement={"d2": 30_000_000.0, "account": {"990006": 56}})
+        d.set("positions_baseline", {"held": {"990006": dict(HELD)}, "trade_seq": 1, "time": "15:40:10"})
         pos = pos_with()
         pos["qty_synced"] = {"date": "2026-10-22", "time": "15:40:30", "by": "15:40 보유 갱신"}
         P.save(self.R.POSITIONS, pos)
-        self.fk.balance_rows = [bal_row("084670", 56)]
+        self.fk.balance_rows = [bal_row("990006", 56)]
         res = self.started("07:10:00", live=False)
         res.prev_settle()
         p = jl(self.R.POSITIONS)
-        self.assertEqual((p["held"]["084670"]["qty"], self.review(), res.day.s["prev_recovery"]["qty_review"]), (56, None, {}))
+        self.assertEqual((p["held"]["990006"]["qty"], self.review(), res.day.s["prev_recovery"]["qty_review"]), (56, None, {}))
         self.assertFalse(any("[수동 확인 필요]" in a for a in self.alerts))
         self.assertEqual(p["qty_synced"]["date"], "2026-10-26")
 
     def test_synced_book_then_2_to_1_is_review_not_adjusted(self):
         pos = pos_with(dict(HELD, qty=56))
         pos["qty_synced"] = {"date": "2026-10-23", "time": "15:40:30", "by": "15:40 보유 갱신"}
-        self.prev_state(steps=("snapshot", "settle"), intents=[intent("084670", "buy", O.ACCEPTED, filled_qty=28, fill_price=33000, pre_qty=28)])
+        self.prev_state(steps=("snapshot", "settle"), intents=[intent("990006", "buy", O.ACCEPTED, filled_qty=28, fill_price=33000, pre_qty=28)])
         P.save(self.R.POSITIONS, pos)
-        self.fk.balance_rows = [bal_row("084670", 112)]
+        self.fk.balance_rows = [bal_row("990006", 112)]
         res = self.started("07:10:00", live=False)
         res.prev_settle()
         r = self.review()
-        h = jl(self.R.POSITIONS)["held"]["084670"]
+        h = jl(self.R.POSITIONS)["held"]["990006"]
         self.assertEqual((r["file_qty"], r["account_qty"], r["where"], h["stop_price"]), (56, 112, "아침 복구", 30000.0))   # 장부 반영된 매수는 설명 아님
 
     def test_intraday_2_to_1_review_pauses_only_that_code(self):
-        duty = {"084670": O.new_duty("trend", "2026-10-23 15:41:00", "추세")}
-        pos = pos_with(dict(HELD, entry_price=33000.0), duty, {"084670": {"since": "2026-10-23", "attempts": 0}})
+        duty = {"990006": O.new_duty("trend", "2026-10-23 15:41:00", "추세")}
+        pos = pos_with(dict(HELD, entry_price=33000.0), duty, {"990006": {"since": "2026-10-23", "attempts": 0}})
         pos["held"]["005930"] = dict(OTHER)
         P.save(self.R.POSITIONS, pos)
-        self.fk.balance_rows = [bal_row("084670", 56, avg=16500), bal_row("005930", 10)]
+        self.fk.balance_rows = [bal_row("990006", 56, avg=16500), bal_row("005930", 10)]
         res = self.started("10:00:00", live=False)
-        self.quotes.update({"084670": 16000.0, "005930": 199000.0})
+        self.quotes.update({"990006": 16000.0, "005930": 199000.0})
         r = res.stop_minute()
-        self.assertEqual(r["qty_changed"], {"084670": {"file": 28, "account": 56}})
+        self.assertEqual(r["qty_changed"], {"990006": {"file": 28, "account": 56}})
         rv = self.review()
         self.assertEqual((rv["file_qty"], rv["account_qty"], rv["ratio"], rv["stop"], rv["price"]), (28, 56, "56/28 = 2.000", 30000.0, 16000.0))
-        h = jl(self.R.POSITIONS)["held"]["084670"]
+        h = jl(self.R.POSITIONS)["held"]["990006"]
         self.assertEqual((h["stop_price"], h["entry_price"]), (30000.0, 33000.0))                    # 자동 조정 없음
-        a = next(x for x in self.alerts if x.startswith("[수동 확인 필요] 084670"))
+        a = next(x for x in self.alerts if x.startswith("[수동 확인 필요] 990006"))
         for part in ("장부 28주", "계좌 56주", "56/28 = 2.000", "손절가 30000", "현재가 16000"):
             self.assertIn(part, a)
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["005930"])           # 다른 종목 손절은 그대로, 084670 추세 의무·손절 멈춤
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["005930"])           # 다른 종목 손절은 그대로, 990006 추세 의무·손절 멈춤
         self.clk.at("10:01:00")
-        self.quotes["084670"] = 10000.0
+        self.quotes["990006"] = 10000.0
         res.stop_minute()
         self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["005930"])
         self.assertFalse(res.day.s.get("buy_block"))                                               # 전체 매수 차단 아님
-        self.assertFalse(any("084670" in w for w in res.buy_gate()))
-        self.assertEqual(P.review_codes(jl(self.R.POSITIONS)), {"084670"})                          # 같은 종목 매수는 주문 계획에서 뺌 (snapshot_and_plan)
+        self.assertFalse(any("990006" in w for w in res.buy_gate()))
+        self.assertEqual(P.review_codes(jl(self.R.POSITIONS)), {"990006"})                          # 같은 종목 매수는 주문 계획에서 뺌 (snapshot_and_plan)
         pos = jl(self.R.POSITIONS)
-        pos["held"]["084670"]["stop_price"] = 15000.0                                              # 사람이 손절가를 고침 -> 끝
+        pos["held"]["990006"]["stop_price"] = 15000.0                                              # 사람이 손절가를 고침 -> 끝
         P.save(self.R.POSITIONS, pos)
         self.clk.at("10:02:00")
         res.stop_minute()
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["005930", "084670"])  # 감시·의무 매도 다시
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["005930", "990006"])  # 감시·의무 매도 다시
 
     def test_premarket_trend_sell_skips_review_code(self):
-        duty = {"084670": O.new_duty("trend", "2026-10-23 15:41:00", "추세")}
-        P.save(self.R.POSITIONS, pos_with(dict(HELD, judged_by="공식 일봉 (다음 날 재판단)"), duty, {"084670": {"since": "2026-10-23", "attempts": 0}}))
-        self.fk.balance_rows = [bal_row("084670", 140)]
+        duty = {"990006": O.new_duty("trend", "2026-10-23 15:41:00", "추세")}
+        P.save(self.R.POSITIONS, pos_with(dict(HELD, judged_by="공식 일봉 (다음 날 재판단)"), duty, {"990006": {"since": "2026-10-23", "attempts": 0}}))
+        self.fk.balance_rows = [bal_row("990006", 140)]
         res = self.started("08:30:00", live=False)
         res.trend_sell()
         self.assertEqual(sends(self.fk, "kt10001"), [])
@@ -107,39 +107,39 @@ class QtyReview(Base6):
     def test_past_review_with_two_unknown_keeps_stop(self):
         rv = {"date": "2026-10-22", "file_qty": 14, "account_qty": 28, "stop": 30000.0, "ratio": "28/14 = 2.000"}
         P.save(self.R.POSITIONS, pos_with(dict(HELD, qty_review=rv)))
-        self.prev_state(steps=("snapshot",), intents=[intent("084670", "buy", O.UNKNOWN, n=1, pre_qty=28), intent("084670", "sell", O.UNKNOWN, n=2, pre_qty=28)])
-        self.fk.balance_rows = [bal_row("084670", 28)]
+        self.prev_state(steps=("snapshot",), intents=[intent("990006", "buy", O.UNKNOWN, n=1, pre_qty=28), intent("990006", "sell", O.UNKNOWN, n=2, pre_qty=28)])
+        self.fk.balance_rows = [bal_row("990006", 28)]
         res = self.started("07:10:00", live=False)
         res.prev_settle()
-        h = jl(self.R.POSITIONS)["held"]["084670"]
+        h = jl(self.R.POSITIONS)["held"]["990006"]
         self.assertEqual((h["stop_price"], h.get("ambiguous"), h.get("info_pending"), h["qty_review"]["stop"]), (30000.0, None, None, 30000.0))
-        self.assertIn("수동 확인 중", res.day.s["prev_recovery"]["ambiguous"]["084670"]["note"])
+        self.assertIn("수동 확인 중", res.day.s["prev_recovery"]["ambiguous"]["990006"]["note"])
         self.assertEqual({i["status"] for i in jl(os.path.join(self.tmp, "intents", "2026-10-23.json"))}, {O.UNKNOWN})   # 의도는 그대로 UNKNOWN
 
     def test_official_rejudge_and_recovery_do_not_touch_review_stop(self):
         rv = {"date": "2026-10-23", "file_qty": 28, "account_qty": 56, "stop": 30000.0, "ratio": "56/28 = 2.000"}
         P.save(self.R.POSITIONS, pos_with(dict(HELD, qty=56, entry_date="2026-10-23", qty_review=rv, stop_temp=True)))
         res = self.started("08:20:00", live=False)
-        self.judged["084670"] = {"close": 16000.0, "stop": 14000.0, "trend": True, "basis": "수정주가 일봉"}
+        self.judged["990006"] = {"close": 16000.0, "stop": 14000.0, "trend": True, "basis": "수정주가 일봉"}
         res.official_vs_1530()
         res.day.set("prev_recovery", {"prev": "2026-10-23", "finalized": False})
-        res.apply_recovery_fixes({"prev": "2026-10-23", "stops": {"084670": {"stop": 13000.0, "basis": "x"}}, "trend": {"084670": True}, "left": [], "at": "08:00"})
+        res.apply_recovery_fixes({"prev": "2026-10-23", "stops": {"990006": {"stop": 13000.0, "basis": "x"}}, "trend": {"990006": True}, "left": [], "at": "08:00"})
         p = jl(self.R.POSITIONS)
-        self.assertEqual((p["held"]["084670"]["stop_price"], p["sell_duty"]), (30000.0, {}))
+        self.assertEqual((p["held"]["990006"]["stop_price"], p["sell_duty"]), (30000.0, {}))
         self.assertIn("수동 확인 중", res.day.s["official_vs_1530"]["diffs"][0]["note"])
         self.assertEqual(res.rejudge_pending({"x": dict(HELD, qty_review=rv)}, "2026-10-23"), [])     # 08:30 추세 매도가 기다리지 않음
 
     def test_1540_unexplained_change_is_review_not_pending(self):
         P.save(self.R.POSITIONS, pos_with())
-        self.fk.balance_rows = [bal_row("084670", 56)]
+        self.fk.balance_rows = [bal_row("990006", 56)]
         res = self.started("15:40:00", live=False)
-        res.day.set("settlement", {"account": {"084670": 56}, "avg_price": {"084670": 16500}})
-        self.cv["084670"] = {"close": 16000.0}
-        self.judged["084670"] = {"close": 16000.0, "stop": 14000.0, "trend": True, "basis": "수정주가 일봉"}
+        res.day.set("settlement", {"account": {"990006": 56}, "avg_price": {"990006": 16500}})
+        self.cv["990006"] = {"close": 16000.0}
+        self.judged["990006"] = {"close": 16000.0, "stop": 14000.0, "trend": True, "basis": "수정주가 일봉"}
         out = res.ac_positions()
-        h = jl(self.R.POSITIONS)["held"]["084670"]
+        h = jl(self.R.POSITIONS)["held"]["990006"]
         self.assertEqual((h["qty"], h["stop_price"], h.get("info_pending"), h["qty_review"]["where"]), (56, 30000.0, None, "15:40 보유 갱신"))
-        self.assertNotIn("084670", out["next_open_sells"])                                          # 추세 판단도 안 함
+        self.assertNotIn("990006", out["next_open_sells"])                                          # 추세 판단도 안 함
         self.assertEqual(jl(self.R.POSITIONS)["qty_synced"]["date"], "2026-10-26")
 
 

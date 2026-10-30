@@ -7,6 +7,8 @@
   sell_duty: {종목: {kind(stop 손절 진행 중 / trend 추세 매도), since(발생일), at(발생 시각), reason, price?, stop?}}
              (11J 보완 3: 매도 의무는 종목 코드 단위. 끝 = 성공한 계좌 조회에서 그 종목 보유 0, orders.end_duties)
   next_open_sells: {종목: {reason, since, attempts, last_status, last_try, last_intent}}   (다음 날 시가 매도 목록 = 15:35·15:40 에 계좌 보유가 남은 의무 종목)
+  closed_today: {종목: {date, at, kind}}   (11N: 오늘 의무가 계좌 보유 0 두 번으로 끝난 판 종목. 15:40 보유 갱신 전까지 새 손절 감지·매수 계획의
+                의무 판단·추세 매도에서 뺌. 날짜가 다르면 무효, 계좌에 다시 보유가 보이면 지움, 15:40 보유 갱신 뒤 지움. orders.closed_codes)
   trade_seq, duty_format, _version, _saved_at
 
 - 저장할 때 직전 파일을 positions.json.bak 으로 남긴다 (Codex 8). 파일이 없으면 빈 보유. 읽기 실패(손상)면 손상 파일을 보관하고 백업으로 복구,
@@ -16,6 +18,7 @@
   진입가 정보가 없으면 계좌 평균단가 - 1.7 x ATR20 을 임시 손절가로 쓰고 stop_temp = True (Codex 5).
 """
 import json
+import math
 import os
 import shutil
 
@@ -221,6 +224,71 @@ def review_codes(pos):
     return {c for c, p in (pos or {}).get("held", {}).items() if in_review(p)}
 
 
+# ---------------------------------------------------------------- 보유 종목 그날 이벤트 (11R C)
+
+def prev_raw_close(code, prev_day, p=None):
+    """그날 기준가와 비교할 전날 원주가 종가: 공식 일봉(원주가 파일 + 추가분)의 전날 행, 없으면(공식 시세 재반영 전 등) 전날 15:30 1분봉 종가
+    (judged_on = 전날). 키움 보관 행(pending)은 장 마감 후 가격이 섞일 수 있어 쓰지 않음. 반환 (종가, 출처) 또는 (None, 이유)"""
+    df = raw_daily(code)
+    x = df[df.timestamp == pd.Timestamp(prev_day)]
+    if len(x) and float(x.close.iat[-1]) > 0:
+        return float(x.close.iat[-1]), "공식 일봉"
+    if p and p.get("judged_on") == str(pd.Timestamp(prev_day).date()) and p.get("close_1530"):
+        return float(p["close_1530"]), "전날 15:30 1분봉 종가"
+    return None, f"전날({pd.Timestamp(prev_day).date()}) 원주가 종가 모름"
+
+
+def base_checked(p, day):
+    """오늘 기준가 확인을 했는가 (했으면 그 기록)"""
+    r = (p or {}).get("base_check")
+    return r if r and r.get("date") == str(pd.Timestamp(day).date()) else None
+
+
+def base_final(p, day):
+    """11R 보완 3: 오늘 기준가 확인이 끝났는가. 08:30 장 전 확인에서 이벤트가 없었으면(기준가가 아직 옛 값일 수 있음) 잠정 (final False) ->
+    09:00 이후 첫 손절 감시 시세로 한 번 더. final 이 없는 예전 기록은 끝난 것으로"""
+    r = base_checked(p, day)
+    return r if r and (r.get("final", True) or r.get("adjusted")) else None
+
+
+def today_k(p, day):
+    """오늘 이벤트로 손절가를 조정했으면 그 k, 아니면 1"""
+    return events_k(p, pd.Timestamp(day) - pd.Timedelta(days=1), day)
+
+
+def events_k(p, since, until):
+    """11R 보완 2: since(그 날 제외) 뒤 ~ until(그 날 포함)에 보유 장부에 기록된 이벤트 손절가 조정 비율(stop_adjust k)의 곱 (날마다 하나).
+    since 날 원주가 기준으로 다시 계산한 손절가(진입일 공식 일봉 손절가·전날 공식 손절가)를 오늘 기준으로 바꿀 때 곱한다"""
+    a, b = str(pd.Timestamp(since).date()), str(pd.Timestamp(until).date())
+    ks = {}
+    for x in (p or {}).get("stop_adjust") or []:
+        if a < str(x.get("date")) <= b:
+            ks.setdefault(str(x["date"]), float(x["base"]) / float(x["prev_close"]) if x.get("base") and x.get("prev_close") else float(x["k"]))
+    out = 1.0
+    for k in ks.values():
+        out *= k
+    return out
+
+
+def event_adjust(p, day, base, prev_close, source, at, final=True):
+    """11R C: 보유 종목의 그날 기준가 확인. k = 기준가 / 전날 원주가 종가 가 0.5%(engine.BASE_EVENT) 넘게 다르면 그날 이벤트(권리락·무상증자·
+    분할 등) -> 저장 손절가(원주가) x k (백테스트는 수정주가라 이벤트로 기계적으로 떨어진 가격에 손절하지 않음). 조정 전·후 손절가를 stop_adjust 에 남김.
+    하루 한 번 (base_check). 11R 보완 3: final False (08:30 장 전 확인) 이고 이벤트가 없으면 잠정 -> 손절 감시 첫 시세로 한 번 더. 반환 기록 dict"""
+    from engine import BASE_EVENT
+    k = float(base) / float(prev_close)
+    rec = {"date": str(pd.Timestamp(day).date()), "at": at, "source": source, "base": float(base), "prev_close": float(prev_close),
+           "k": round(k, 6), "adjusted": False, "final": bool(final)}
+    if abs(k - 1) >= BASE_EVENT and p.get("stop_price"):
+        before = float(p["stop_price"])
+        after = before * k
+        rec.update(adjusted=True, stop_before=before, stop_after=after)
+        p.setdefault("stop_adjust", []).append({k_: rec[k_] for k_ in ("date", "at", "source", "base", "prev_close", "k", "stop_before", "stop_after")})
+        p["stop_price"] = after
+        p["stop_basis"] = f"{p.get('stop_basis', '')} -> {rec['date']} 이벤트 k={k:.4f} (기준가 {base:,.0f} / 전날 종가 {prev_close:,.0f}) 반영 {before:,.0f} -> {after:,.0f}"[-300:]
+    p["base_check"] = rec
+    return rec
+
+
 def mark_synced(pos, day, at, by):
     """보유 장부 수량을 계좌로 맞춘 때 (11K 보완 3: 이 날 이후의 의도만 수량 변화를 설명한다)"""
     pos["qty_synced"] = {"date": str(day), "time": at, "by": by}
@@ -228,9 +296,20 @@ def mark_synced(pos, day, at, by):
 
 # ---------------------------------------------------------------- 현금 대조 (Codex 20)
 
+def kiwoom_fee(amount, rate):
+    """11O: 키움 매매수수료 = 체결 금액 x 수수료율, 10원 미만 절사 (주문 하나의 체결 금액 합 기준)"""
+    return math.floor(round(float(amount) * float(rate), 6) / 10) * 10
+
+
+def kiwoom_tax(amount, rate):
+    """11O: 매도 세금(증권거래세·농특세) = 체결 금액 x 세율, 원 미만 절사"""
+    return math.floor(round(float(amount) * float(rate), 6))
+
+
 def expected_cash(prev_d2, records, year, commission=None):
     """전일 D+2 추정예수금 + 당일 체결 금액 ± 비용 (수수료 commission, 없으면 백테스트 0.015%, 매도세 그해 세율). 반환 (기대값, 체결 건수).
-    11K 11: 수수료는 환경별 (config commission: 모의 0.35%, 실전 0.015%)"""
+    11K 11: 수수료는 환경별 (config commission: 모의 0.35%, 실전 0.015%).
+    11O: 키움 절사 규칙 (주문마다 수수료 10원 미만 절사, 세금 원 미만 절사). 2026-10-29 모의 실측(매도 1·매수 3)이 이 규칙 + 실제 체결 금액으로 원 단위까지 맞음"""
     tax = sb.SELL_TAX.get(int(year), 0.002)
     fee = sb.COMMISSION if commission is None else float(commission)
     cash, n = float(prev_d2), 0
@@ -241,9 +320,9 @@ def expected_cash(prev_d2, records, year, commission=None):
         n += 1
         amt = float(px) * q
         if r.get("side") == "buy":
-            cash -= amt * (1 + fee)
+            cash -= amt + kiwoom_fee(amt, fee)
         elif r.get("side") == "sell":
-            cash += amt * (1 - fee - tax)
+            cash += amt - kiwoom_fee(amt, fee) - kiwoom_tax(amt, tax)
     return cash, n
 
 
@@ -253,6 +332,13 @@ def fill_amount(records, kind=None, side=None):
                      and (kind is None or r.get("kind") == kind) and (side is None or r.get("side") == side)))
 
 
-def cash_tolerance(n_fills):
-    """비용 반올림 수준: 체결 1건마다 수수료·세금 10원 단위 절사 2번 + 1원"""
-    return 20.0 * n_fills + 1.0
+def cash_tolerance(records):
+    """11O: 현금 대조 허용치 (원) = 1 + 체결 주문마다 [체결 수량 x 1원 (ka10076 cntr_pric 는 주문의 평균 체결가를 원 단위로 끊은 값이라
+    여러 가격에 나눠 체결되면 1주당 1원 미만 차이, 2026-10-29 990011 228주 기록 3461 = 실제 평균 약 3461.36) + 10원 (수수료 10원 절사 경계)
+    + 2원 (세금 원 절사 경계, 거래세·농특세 따로)]. 예전 20원 x 건수 + 1 은 체결가 끊김을 넣지 않아 수량이 많은 매도에서 넘침"""
+    tol = 1.0
+    for r in records:
+        q = int(r.get("filled_qty") or 0)
+        if q > 0 and r.get("fill_price"):
+            tol += q + 12
+    return tol

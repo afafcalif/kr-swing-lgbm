@@ -152,7 +152,7 @@ def build():
     b, cols, _, chk = M.load("2026-10")
     assert chk["ok"]
     index = index_series()
-    pool = E.ShardPool(sd.universe_codes(), n=12, use_append=True)
+    pool = E.ShardPool(sd.universe_codes(), use_append=True)
     days = []
     try:
         for D in GAP_DAYS:

@@ -258,7 +258,7 @@ def setup(t="2026-10-23 15:21:05", path=None):
     return clk, fk, om, notes
 
 
-PLAN = [{"code": "084670", "qty": 28, "limit_price": 33350, "skip": ""}]
+PLAN = [{"code": "990006", "qty": 28, "limit_price": 33350, "skip": ""}]
 
 
 def wait_for(cond, timeout=5.0, step=0.02):
@@ -393,7 +393,7 @@ class T(unittest.TestCase):
         self.assertFalse(any(c[1] == "kt10003" for c in fk.calls))
         fk.fill(r["ord_no"], 28, 32100, "15:30:21")
         clk.at("15:35:00")
-        self.assertTrue(om.close_check(close_prices={"084670": 32100})["done"])
+        self.assertTrue(om.close_check(close_prices={"990006": 32100})["done"])
         self.assertEqual(r["filled_qty"], 28)
         self.assertEqual(r["unfilled_qty"], 0)
         self.assertEqual(r["fill_status"], "체결")
@@ -430,35 +430,35 @@ class T(unittest.TestCase):
 
     def test_stop_loss_market_once(self):
         clk, fk, om, _ = setup("2026-10-23 10:00:00")
-        held = {"084670": {"qty": 28, "avg_price": 32100, "cur_price": 29900, "sellable": 28}}
-        hold(fk, "084670", 28)
+        held = {"990006": {"qty": 28, "avg_price": 32100, "cur_price": 29900, "sellable": 28}}
+        hold(fk, "990006", 28)
         tr = {}
-        om.stop_check(acct_view(fk, held), {"084670": 30000}, triggered=tr)
-        om.stop_check(acct_view(fk, held), {"084670": 30000}, triggered=tr)   # 접수된 28주가 매도 가능 수량을 묶음 -> 안 보냄
+        om.stop_check(acct_view(fk, held), {"990006": 30000}, triggered=tr)
+        om.stop_check(acct_view(fk, held), {"990006": 30000}, triggered=tr)   # 접수된 28주가 매도 가능 수량을 묶음 -> 안 보냄
         s = sends(fk, "kt10001")
         self.assertEqual(len(s), 1)
         self.assertEqual(s[0][2]["trde_tp"], "3")
         self.assertEqual(s[0][2]["ord_qty"], "28")
         clk2, fk2, om2, _ = setup("2026-10-23 15:21:00")
-        om2.stop_check(held, {"084670": 30000})
+        om2.stop_check(held, {"990006": 30000})
         self.assertEqual(len(sends(fk2, "kt10001")), 0)
 
     def test_locked_sell_unfilled_carry_to_next_open(self):
         clk, fk, om, _ = setup("2026-10-23 10:00:00")
-        held = {"084670": {"qty": 28, "avg_price": 32100, "cur_price": 22000, "sellable": 28}}
-        hold(fk, "084670", 28)
-        r = om.stop_check(held, {"084670": 30000})[0]
+        held = {"990006": {"qty": 28, "avg_price": 32100, "cur_price": 22000, "sellable": 28}}
+        hold(fk, "990006", 28)
+        r = om.stop_check(held, {"990006": 30000})[0]
         clk.at("15:35:00")
         om.close_check()
         self.assertEqual(r["fill_status"], "미체결, 다음 날 시가 재주문")
-        self.assertEqual(om.next_open_sells, ["084670"])
+        self.assertEqual(om.next_open_sells, ["990006"])
         self.assertEqual(len([c for c in fk.calls if c[1] == "kt10003"]), 1)
         clk3, fk3, om3, _ = setup("2026-10-24 08:31:00")
-        hold(fk3, "084670", 28)
+        hold(fk3, "990006", 28)
         om3.trend_sells(om.next_open_sells, held)
         self.assertEqual(len(sends(fk3, "kt10001")), 1)
         clk4, fk4, om4, _ = setup("2026-10-24 09:00:30")
-        om4.trend_sells(["084670"], held)
+        om4.trend_sells(["990006"], held)
         self.assertEqual(len(sends(fk4, "kt10001")), 0)
 
     def test_p4_plan_skips(self):
@@ -490,8 +490,8 @@ class T(unittest.TestCase):
     def test_stop_by_quote_while_account_fails_and_alerts_once(self):
         clk, fk, om, notes = setup("2026-10-23 10:00:00")
         watch = O.AccountWatch(notify=notes.append, n_alert=3)
-        pos = {"held": {"084670": {"qty": 28, "stop_price": 30000, "kind": "본래"}}}
-        hold(fk, "084670", 28)
+        pos = {"held": {"990006": {"qty": 28, "stop_price": 30000, "kind": "본래"}}}
+        hold(fk, "990006", 28)
         price = {"v": 31000}
 
         def quote(codes):
@@ -516,7 +516,7 @@ class T(unittest.TestCase):
         self.assertEqual(watch.longest_min, 4.0)
 
         def bal_ok():
-            return {"acnt_evlt_remn_indv_tot": [{"stk_cd": "A084670", "rmnd_qty": "28", "trde_able_qty": "0", "pur_pric": "32100", "cur_prc": "29900"}]}
+            return {"acnt_evlt_remn_indv_tot": [{"stk_cd": "A990006", "rmnd_qty": "28", "trde_able_qty": "0", "pur_pric": "32100", "cur_prc": "29900"}]}
         O.stop_cycle(om, watch, pos, quote, bal_ok, clk(), seen)
         O.stop_cycle(om, watch, pos, quote, bal_ok, clk(), seen)
         self.assertEqual(sum("[회복]" in n for n in notes), 1)      # 회복 알림 한 번
@@ -525,8 +525,8 @@ class T(unittest.TestCase):
     def test_holding_mismatch_alert_once(self):
         clk, fk, om, notes = setup("2026-10-23 11:00:00")
         watch = O.AccountWatch(notify=notes.append)
-        pos = {"held": {"084670": {"qty": 28, "stop_price": 30000}}}
-        bal = lambda: {"acnt_evlt_remn_indv_tot": [{"stk_cd": "A084670", "rmnd_qty": "28", "trde_able_qty": "28", "pur_pric": "1", "cur_prc": "31000"},  # noqa: E731
+        pos = {"held": {"990006": {"qty": 28, "stop_price": 30000}}}
+        bal = lambda: {"acnt_evlt_remn_indv_tot": [{"stk_cd": "A990006", "rmnd_qty": "28", "trde_able_qty": "28", "pur_pric": "1", "cur_prc": "31000"},  # noqa: E731
                                                    {"stk_cd": "A005930", "rmnd_qty": "20", "trde_able_qty": "20", "pur_pric": "1", "cur_prc": "1"}]}
         seen = set()
         r1 = O.stop_cycle(om, watch, pos, lambda cs: {c: 31000 for c in cs}, bal, clk(), seen)
@@ -540,8 +540,8 @@ class T(unittest.TestCase):
         clk = FakeClock("2026-10-23 15:22:00")
         fk = FakeKiwoom(clk)
         b = O.Broker(fk, allow_orders=False)
-        self.assertEqual(b.buy_limit("084670", 1, 1000)["outcome"], O.NOT_SENT)
-        self.assertEqual(b.cancel("1", "084670")["outcome"], O.NOT_SENT)
+        self.assertEqual(b.buy_limit("990006", 1, 1000)["outcome"], O.NOT_SENT)
+        self.assertEqual(b.cancel("1", "990006")["outcome"], O.NOT_SENT)
         self.assertEqual(fk.calls, [])
 
 

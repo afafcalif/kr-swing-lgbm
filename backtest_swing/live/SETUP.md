@@ -114,7 +114,8 @@ powershell -ExecutionPolicy Bypass -File backtest_swing\live\register_tasks.ps1 
 
 - `kr-swing-watchdog` (감시 작업): `.venv-feat\Scripts\pythonw.exe`(창 없음)로 로그온 때 + 5분마다 `watchdog.py` 실행. 상주 프로그램이 없으면 창 없이 다시 켜고(정지 요청 파일이 있으면 켜지 않음), 하트비트가 5분 끊기면 텔레그램 알림. 작업이 실패하면 1분 뒤 다시(최대 3번), 2분 넘게 걸리면 정리 (상주 프로그램은 작업에서 떨어져 있어 영향 없음).
 - `kr-swing-viewlog` (`-ViewLogAtLogon` 을 줄 때만): 로그온 때 로그 창을 연다. **서브 PC 만 등록한다. 메인 PC 는 등록하지 않는다** (게임 중 창이 뜨지 않게).
-- 다시 실행하면 같은 이름의 작업을 덮어쓴다. 둘 다 지우기: `register_tasks.ps1 -Remove`.
+- `<백업 작업>` (`-Backup -BackupDest <경로>` 를 줄 때만, 감시 작업과 따로 등록): 매일 18:00 운영 데이터 백업. 14절.
+- 다시 실행하면 같은 이름의 작업을 덮어쓴다. 모두 지우기: `register_tasks.ps1 -Remove`.
 - 파이썬 경로를 바꾸려면 `-Python "D:\kr-swing-lgbm\.venv-feat\Scripts\pythonw.exe"` (반드시 `pythonw.exe`).
 
 ## 8. 켜기·끄기·로그 보기
@@ -140,6 +141,8 @@ powershell -ExecutionPolicy Bypass -File backtest_swing\live\register_tasks.ps1 
 | `logs/exec/update.log` | 코드 갱신 결과 (이전 → 새 커밋, 시험 개수, 걸린 시간, 되돌림) |
 | `logs/exec/resident.out.log` | 상주 프로그램의 표준 출력·오류 (파이썬 예외 추적) |
 | `logs/exec/state/{날짜}.json` | 그날 단계 상태·주문 결정·정산 (재시작하면 여기서 이어감) |
+| `logs/exec/backup.log` | 백업 기록 (14절): 복사한 개수, 못 닿은 이유, 연속 실패 일수, 대조 결과 |
+| `logs/exec/features/{날짜}.parquet` | 장후 특징값 (대상 종목의 특징값·점수·순위). 같은 이름 `.json` 에 상주 점수와의 대조 결과, `features_eod.log` 에 한 줄씩 |
 
 ## 10. 코드 갱신 (`update.bat`)
 
@@ -208,3 +211,104 @@ powershell -ExecutionPolicy Bypass -File backtest_swing\live\register_tasks.ps1 
 
 - 메인 PC 기준값 (2026-10-24): 같은 PC 에서 다시 학습하면 차이 0, 상위 3 일치, 학습 26.7초.
 - 판단에 필요한 결과(판정·최대 차·상위 3 일치)만 메인 PC 쪽에 알려 주면 된다.
+
+## 14. 운영 데이터 백업 (메인 PC 공유 폴더, 11M)
+
+`logs/exec`·`data/live_append`·`models_live` 는 git 에 없어 서브 PC 에만 있다. 서브 PC 가 매일 18:00 에 메인 PC 공유 폴더로 복사한다 (`backup.py`, 작업 `<백업 작업>`).
+메인 PC 가 꺼져 있으면 복사하지 않고 그날 사본만 서브 PC 에 쌓아 두었다가, 켜져 있는 날 한꺼번에 옮긴다. 3일 연속 못 닿으면 텔레그램 알림.
+
+대상 폴더 안 모양:
+
+| 경로 | 내용 |
+|---|---|
+| `KR_SWING_BACKUP` | 표지 파일 (빈 파일). 이게 없으면 아무것도 복사하지 않는다 |
+| `mirror\` | `logs\exec\`, `data\live_append\`, `models_live\stage5\`, `models_live\datasets\{달}\dataset.parquet`, `data\universe_*.csv`, `data\universe_current.json` (저장소와 같은 상대 경로). 바뀐 파일만 복사하고 지우지 않는다. 일봉 추가분 버전만 최근 10거래일 + 월말 버전으로 솎는다 |
+| `daily\{날짜}\` | 그날 장 마감 뒤 상태: `summary.csv`, `ledger.json`, `state\positions.json`(+`.bak`), `state\{날짜}.json`, `state\intents\{날짜}.json`, 그날 로그 `{날짜}.json`·`{날짜}_rerun.json`, `MANIFEST.json` (크기·해시) |
+| `manifests\{날짜}.json` | 그날 실행의 미러 파일 목록 (경로·크기·해시) |
+
+`.env`·토큰 캐시·`config.json`·`*.pid`·`*.lock` 은 넣지 않는다. 로그 파일에 `.env` 의 키·시크릿·계좌·토큰 값이 들어 있으면 그 파일은 건너뛰고 알림.
+
+### 14-1. 메인 PC: 공유 폴더 만들기 (관리자 PowerShell, 한 번만)
+
+백업 전용 로컬 계정을 만들어 그 계정만 쓸 수 있게 한다 (메인 PC 의 내 계정 암호를 서브 PC 에 두지 않게). 폴더는 저장소(`D:\kr-swing-lgbm`) 밖에 둔다.
+
+```powershell
+net user <백업 계정> * /add
+```
+(암호를 두 번 묻는다. 직접 입력, 화면에 안 보임. 로그인 화면에 <백업 계정> 이 하나 더 보이는 것은 정상)
+
+```powershell
+New-Item -ItemType Directory -Force <백업 폴더>
+```
+```powershell
+icacls <백업 폴더> /grant "<백업 계정>:(OI)(CI)M"
+```
+```powershell
+New-SmbShare -Name <공유 이름> -Path <백업 폴더> -ChangeAccess "$env:COMPUTERNAME\<백업 계정>"
+```
+```powershell
+New-Item -ItemType File <백업 폴더>\KR_SWING_BACKUP
+```
+네트워크가 "개인"인지 확인하고, 파일 공유 방화벽 규칙을 개인 네트워크에서만 켠다:
+```powershell
+Get-NetConnectionProfile
+```
+(`NetworkCategory` 가 `Public` 이면: `Set-NetConnectionProfile -InterfaceAlias "이더넷" -NetworkCategory Private`, 이름은 위 결과의 `InterfaceAlias`)
+```powershell
+Get-NetFirewallRule -Group "@FirewallAPI.dll,-28502" | Where-Object { $_.Profile -match 'Private' } | Enable-NetFirewallRule
+```
+메인 PC 이름 확인 (서브 PC 에서 쓸 이름):
+```powershell
+$env:COMPUTERNAME
+```
+
+### 14-2. 서브 PC: 자격 증명 저장·등록 (한 번만)
+
+먼저 `update.bat` 로 코드를 받는다 (`backup.py` 가 있어야 등록된다). 아래 `메인PC이름` 은 14-1 의 이름 (이름으로 안 닿으면 메인 PC 의 IP 주소, 예 `192.168.0.10`).
+
+1. 자격 증명 저장 (상주 프로그램을 돌리는 그 사용자로, 일반 PowerShell). 암호를 묻는다 — 14-1 에서 정한 <백업 계정> 암호를 직접 입력:
+   ```powershell
+   cmdkey /add:메인PC이름 /user:메인PC이름\<백업 계정> /pass
+   ```
+2. 닿는지 확인 (메인 PC 를 켠 상태에서). `True` 여야 한다:
+   ```powershell
+   Test-Path "\\메인PC이름\<공유 이름>\KR_SWING_BACKUP"
+   ```
+3. 작업 등록 (관리자 PowerShell). 감시 작업은 건드리지 않는다:
+   ```powershell
+   cd D:\kr-swing-lgbm
+   powershell -ExecutionPolicy Bypass -File backtest_swing\live\register_tasks.ps1 -Root "D:\kr-swing-lgbm" -Backup -BackupDest "\\메인PC이름\<공유 이름>"
+   ```
+   `<백업 작업>`: 매일 18:00, 놓치면 켜질 때 실행, 제한 30분, 중복 실행 안 함, 지금 로그온한 사용자 계정 (1 에서 저장한 자격 증명을 씀). 지우기는 `register_tasks.ps1 -Remove` (작업 셋 모두).
+4. 장중이 아닐 때(거래일 16:30 뒤·주말) 한 번 손으로 돌려 본다. 처음에는 모델·데이터셋까지 복사해 몇 분 걸릴 수 있다:
+   ```powershell
+   .venv-feat\Scripts\python.exe backtest_swing\live\backup.py --dest "\\메인PC이름\<공유 이름>"
+   ```
+   ```powershell
+   .venv-feat\Scripts\python.exe backtest_swing\live\backup.py --verify --dest "\\메인PC이름\<공유 이름>"
+   ```
+   마지막 줄이 `백업 끝: …`, 대조는 `대조 통과: …` 여야 한다. 기록은 `logs\exec\backup.log`.
+
+- 장중(거래일 07:00 ~ 16:30, 수능일 등은 하루 끝이 그만큼 늦게)에 실행되면 아무것도 하지 않고 끝난다. 실패해도 매매에는 영향이 없다.
+- 백업 전에 같은 작업 안에서 `features_eod.py --pending` 이 그날 장후 특징값을 저장한다 (`logs\exec\features\`, 1분 안팎, 키움 호출 없음). 상주 점수와 차이가 0 이 아니면 알림.
+- 메인 PC 암호를 바꾸면 서브 PC 에서 1 을 다시 한다 (`cmdkey /delete:메인PC이름` 뒤 다시 `/add`).
+
+### 14-3. 복원
+
+- **대조**: 메인 PC 에서도 할 수 있다 (저장소 폴더에서). `--date YYYY-MM-DD` 를 주면 그날 목록과 그날 사본만.
+  ```powershell
+  .venv-feat\Scripts\python.exe backtest_swing\live\backup.py --verify --dest "<백업 폴더>"
+  ```
+- **서브 PC 를 새로 설치할 때** (서브 PC 고장·교체): 2절 git clone·가상 환경 → 3절 이전 묶음(백테스트 기준 일봉·지수, 메인 PC 에서 `make_bundle.py`)과 `.env` → **그 위에** 백업 미러를 덮어 쓴다 (일봉 추가분·모델·장부·상태·로그가 서브 PC 마지막 백업 시점으로). 순서를 바꾸면 묶음의 오래된 장부·상태가 미러를 덮는다.
+  ```powershell
+  robocopy "\\메인PC이름\<공유 이름>\mirror" "D:\kr-swing-lgbm" /E
+  ```
+  (robocopy 종료 코드 0 ~ 7 은 정상) → 12절 첫 실행 확인부터.
+- **덮어쓴 파일을 그날 상태로 되돌릴 때** (예: 장부·보유 장부가 망가짐): `stop_resident.bat` 로 끈 뒤 `daily\{날짜}\` 의 파일을 같은 이름 자리로 복사하고 `start_resident.bat`. 예 (10-28 장 마감 뒤 상태로):
+  ```powershell
+  Copy-Item "\\메인PC이름\<공유 이름>\daily\2026-10-28\ledger.json" "D:\kr-swing-lgbm\logs\exec\ledger.json"
+  ```
+  ```powershell
+  Copy-Item "\\메인PC이름\<공유 이름>\daily\2026-10-28\state\positions.json" "D:\kr-swing-lgbm\logs\exec\state\positions.json"
+  ```
+  그날 사본은 장 마감 뒤 상태다. 그 뒤 날의 체결은 켤 때 아침 복구(계좌 대조)가 맞추고, 맞지 않는 종목은 수동 확인 알림이 온다.

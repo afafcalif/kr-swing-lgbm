@@ -100,10 +100,69 @@ def data_file(name, append_dir=None):
     return os.path.join(data_dir(append_dir), name)
 
 
+PINS = "PINNED.json"  # 11S: 그날 15:18 스냅샷에 쓴 데이터 버전 {날짜: 버전 이름} (지난 버전 정리에서 지우지 않음)
+PIN_KEEP = 10         # 최근 이만큼의 날짜만 고정 유지
+
+
+def pinned_versions(append_dir=None):
+    import json
+    try:
+        with open(os.path.join(append_dir or APPEND_DIR, PINS), encoding="utf-8") as f:
+            return dict(json.load(f))
+    except (OSError, ValueError):
+        return {}
+
+
+def pin_version(day, version, append_dir=None):
+    """11S: 그날 스냅샷에 쓴 버전을 고정 (15:32 동결 대조·features_eod 가 그 버전을 찾게, 장중 재수집으로 버전이 여러 개 생겨도 안 지움)"""
+    ad = append_dir or APPEND_DIR
+    pins = pinned_versions(ad)
+    pins[str(pd.Timestamp(day).date())] = version
+    atomic_json(os.path.join(ad, PINS), dict(sorted(pins.items())[-PIN_KEEP:]))
+
+
+IN_USE = "IN_USE.json"  # 11S 보완 2: 상주가 지금 적재해 쓰는 데이터 버전 {version, since, why} (채택한 순간부터 다음 적재 채택까지 정리에서 안 지움)
+
+
+def in_use_version(append_dir=None):
+    import json
+    try:
+        with open(os.path.join(append_dir or APPEND_DIR, IN_USE), encoding="utf-8") as f:
+            return json.load(f).get("version")
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def mark_in_use(version, why="", append_dir=None):
+    """11S 보완 2: 적재를 채택한 순간 그 버전을 '사용 중'으로 (한 벌만: 다음 채택이 바꿔 쓰면 이전 버전은 해제, 그날 고정은 PINNED.json 이 따로)"""
+    atomic_json(os.path.join(append_dir or APPEND_DIR, IN_USE), {"version": version, "since": now_kst().strftime("%Y-%m-%d %H:%M:%S"), "why": why})
+
+
+def version_dir(name=None, data_version=None, append_dir=None):
+    """11S: 버전 폴더 찾기: 이름(versions/{name})이 있으면 그것, 아니면 update.json 의 data_version 이 같은 폴더 (예전 방식이면 append_dir 자체). 없으면 None"""
+    import json
+    ad = append_dir or APPEND_DIR
+    vd = os.path.join(ad, "versions")
+    if name and os.path.isdir(os.path.join(vd, name)):
+        return os.path.join(vd, name)
+    if not data_version:
+        return None
+    cands = [os.path.join(vd, v) for v in sorted(os.listdir(vd), reverse=True)] if os.path.isdir(vd) else []
+    for d in cands + [ad]:
+        try:
+            with open(os.path.join(d, "update.json"), encoding="utf-8") as f:
+                if json.load(f).get("data_version") == data_version:
+                    return d
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def publish_data(files, append_dir=None, keep=3):
     """새 버전 폴더에 adj·raw·지수·update.json 을 모두 쓴 뒤, 포인터 파일(CURRENT.json) 하나만 원자적으로 바꾼다 (확인 리뷰 15).
     files: 이름 -> DataFrame(parquet) 또는 dict(json). 주지 않은 파일은 현재 버전에서 복사 (한 버전 안에서 서로 맞게).
-    중간에 실패하면 포인터를 안 바꿔 이전 버전 그대로. 지난 버전은 최근 keep 개만 남긴다 (지우기 실패는 무시). 반환: 새 버전 이름"""
+    중간에 실패하면 포인터를 안 바꿔 이전 버전 그대로. 지난 버전은 최근 keep 개만 남긴다 (지우기 실패는 무시, 11S: 고정 버전(PINNED.json)·사용 중 버전(IN_USE.json)은 남김).
+    반환: 새 버전 이름"""
     import json
     import shutil
     ad = append_dir or APPEND_DIR
@@ -128,8 +187,9 @@ def publish_data(files, append_dir=None, keep=3):
         raise
     atomic_json(os.path.join(ad, "CURRENT.json"), {"version": v, "published": now_kst().strftime("%Y-%m-%d %H:%M:%S")})
     vs = sorted(os.listdir(os.path.join(ad, "versions")))
+    pinned = set(pinned_versions(ad).values()) | {in_use_version(ad)}  # 11S 보완 2: 상주가 쓰는 버전도 남김
     for old in vs[:-keep]:
-        if old != v:
+        if old != v and old not in pinned:
             shutil.rmtree(os.path.join(ad, "versions", old), ignore_errors=True)
     return v
 
@@ -420,6 +480,14 @@ class RateGate:
         return gate
 
 
+def rate_json(j):
+    """11P: 조회 응답 JSON 이 키움 유량 초과인지 (return_code 5, 또는 0 이 아닌 return_code 에 "[1700:허용된 요청 개수를 초과 ...]")"""
+    if not isinstance(j, dict):
+        return False
+    rc, m = j.get("return_code"), str(j.get("return_msg") or "")
+    return rc in (5, "5") or (rc not in (None, 0, "0") and ("1700" in m or "허용된 요청 개수" in m))
+
+
 class Caller:
     """시세 조회 TR 만. rps 이하로 호출, 유량 초과(HTTP 429 / return_code 5)면 백오프, 연속 5번이면 중단 (EXEC_SPEC 1A)."""
 
@@ -463,8 +531,8 @@ class Caller:
                 err = None
             if r is not None:
                 j = r.json()
-                if j.get("return_code") in (5, "5"):
-                    err = f"return_code 5 {j.get('return_msg')}"
+                if rate_json(j):  # 11P: return_code 5 말고도 유량 초과 메시지("1700"·"허용된 요청 개수")면 같은 백오프 (예전에는 빈 응답으로 넘어감)
+                    err = f"return_code {j.get('return_code')} {j.get('return_msg')}"
                 else:
                     self.fail_streak = 0
                     return j, r.headers.get("cont-yn"), r.headers.get("next-key", "")

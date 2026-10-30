@@ -55,6 +55,8 @@ def fetch_day(bas_dd: str) -> pd.DataFrame:
         "market": df["market"], "open": df["TDD_OPNPRC"].map(_num), "high": df["TDD_HGPRC"].map(_num),
         "low": df["TDD_LWPRC"].map(_num), "close": df["TDD_CLSPRC"].map(_num), "volume": df["ACC_TRDVOL"].map(_num),
         "amount": df["ACC_TRDVAL"].map(_num), "list_shares": df["LIST_SHRS"].map(_num),
+        # 전일대비 (종가 - 기준가). 기준가 = 종가 - chg 가 전날 종가와 다르면 그날 권리락·분할 등 (11P 공식 값 채움 확인용)
+        "chg": df["CMPPREVDD_PRC"].map(_num) if "CMPPREVDD_PRC" in df else float("nan"),
     })
 
 

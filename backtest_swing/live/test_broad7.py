@@ -138,18 +138,18 @@ class MonthlyCatchup(Catch):
 
     def test_training_past_0900_stop_monitor_runs(self):
         P.save(self.R.POSITIONS, pos_with())
-        self.fk.balance_rows = [bal_row("084670", 28)]
+        self.fk.balance_rows = [bal_row("990006", 28)]
         self.clk.t = pd.Timestamp("2026-11-02 07:00:00")
         res = self.arm(self.started("07:00:00", live=False))
         res.tick(self.clk())
         self.assertEqual(len(self.procs), 1)
-        self.quotes["084670"] = 29000.0                                              # 손절가 30000 아래
+        self.quotes["990006"] = 29000.0                                              # 손절가 30000 아래
         self.clk.at("09:00:00")
         t0 = time.time()
         res.tick(self.clk())
         self.assertLess(time.time() - t0, 2.0)
         self.assertFalse(self.procs[0].done)                                         # 학습은 계속 (끄지 않음)
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["084670"])
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])
 
     def test_1500_deadline_kills_and_blocks_buys(self):
         self.clk.t = pd.Timestamp("2026-11-02 07:00:00")
@@ -210,7 +210,7 @@ class FilterInput(Base6):
     def test_snapshot_with_nan_filter_blocks_buys_and_no_check_mode_end(self):
         R = self.R
         res = self.started("15:18:40", live=False)
-        codes = ["084670"]
+        codes = ["990006"]
         raw = pd.DataFrame({"stk_cd": codes, "upl_pric": ["+42900"], "base_pric": ["33000"], "lst_pric": ["23100"]})
         snap = pd.DataFrame({"code": codes, "open": [33000.0], "high": [33500.0], "low": [32800.0], "close": [33100.0], "volume": [1e5],
                              "amount": [3.3e9], "dt": ["20261026"], "cntr_tm": ["151830"]})
@@ -243,15 +243,15 @@ class FilterInput(Base6):
 
 class RejudgeWithoutModel(Base6):
     def trend_pos(self):
-        duty = {"084670": O.new_duty("trend", "2026-10-23 15:41:00", "추세 매도 (2026-10-23 종가 < 20일선, 15:30 1분봉)")}
-        P.save(self.R.POSITIONS, pos_with(dict(HELD, trend_sell_next_open=True), duty, {"084670": {"since": "2026-10-23", "attempts": 0}}))
-        self.fk.balance_rows = [bal_row("084670", 28)]
+        duty = {"990006": O.new_duty("trend", "2026-10-23 15:41:00", "추세 매도 (2026-10-23 종가 < 20일선, 15:30 1분봉)")}
+        P.save(self.R.POSITIONS, pos_with(dict(HELD, trend_sell_next_open=True), duty, {"990006": {"since": "2026-10-23", "attempts": 0}}))
+        self.fk.balance_rows = [bal_row("990006", 28)]
 
     def test_prep_work_judges_before_model_load(self):
         import run_day as RD
         self.trend_pos()
         res = self.started("08:10:00", live=False)
-        self.judged["084670"] = {"close": 34000.0, "stop": 30000.0, "trend": False, "basis": "수정주가 일봉"}
+        self.judged["990006"] = {"close": 34000.0, "stop": 30000.0, "trend": False, "basis": "수정주가 일봉"}
         saved = RD.prepare
         RD.prepare = lambda day: (_ for _ in ()).throw(FileNotFoundError("models_live/stage5/2026-10/meta.json"))
         try:
@@ -260,14 +260,14 @@ class RejudgeWithoutModel(Base6):
             RD.prepare = saved
         out = res.prep_result
         self.assertIn("FileNotFoundError", out["error"])
-        self.assertFalse(out["official_judge"]["084670"]["trend"])                   # 모델이 없어도 공식 판단은 계산됨
+        self.assertFalse(out["official_judge"]["990006"]["trend"])                   # 모델이 없어도 공식 판단은 계산됨
 
     def test_model_load_failure_still_releases_trend_duty_before_0830(self):
         self.trend_pos()
         res = self.started("08:20:00", live=False)
         res.prep_thread, res.prep_reason = object(), "하루 시작"
         res.prep_result = {"error": "FileNotFoundError('meta.json')", "recovery": None,
-                           "official_judge": {"084670": {"close": 34000.0, "stop": 30000.0, "trend": False, "basis": "수정주가 일봉"}, "_missing": []}}
+                           "official_judge": {"990006": {"close": 34000.0, "stop": 30000.0, "trend": False, "basis": "수정주가 일봉"}, "_missing": []}}
         res.judge_result = res.prep_result["judge"] = {"day": res.day.date, "recovery": None, "official_judge": res.prep_result["official_judge"]}
         res.tick(self.clk())
         p = jl(self.R.POSITIONS)
@@ -286,7 +286,7 @@ class RejudgeWithoutModel(Base6):
         self.assertEqual(sends(self.fk, "kt10001"), [])
         self.clk.at("08:50:00")
         res.tick(self.clk())
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["084670"])   # 전날 판단으로 보냄
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])   # 전날 판단으로 보냄
         self.assertTrue(res.day.s["trend_sell_without_official"]["codes"])
         self.assertTrue(any(a.startswith("[추세 매도 공식 판단 없음]") for a in self.alerts))
 
@@ -294,11 +294,11 @@ class RejudgeWithoutModel(Base6):
         self.trend_pos()
         res = self.started("08:30:00", live=False)
         res.tick(self.clk())
-        self.judged["084670"] = {"close": 31000.0, "stop": 30000.0, "trend": True, "basis": "수정주가 일봉"}
+        self.judged["990006"] = {"close": 31000.0, "stop": 30000.0, "trend": True, "basis": "수정주가 일봉"}
         res.official_vs_1530()                                                       # 08:40 공식 판단 (참, 같음)
         self.clk.at("08:40:00")
         res.tick(self.clk())
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["084670"])
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])
         self.assertNotIn("trend_sell_without_official", res.day.s)
 
 
@@ -309,7 +309,7 @@ class RejudgeWithoutModel(Base6):
 
 class CheckModeStart(Base6):
     def sell(self, res, created, px):
-        it = res.om.store.add(date="2026-10-26", stage="stop", side="sell", code="084670", qty=10, price=None, trde_tp="3", attempt=1,
+        it = res.om.store.add(date="2026-10-26", stage="stop", side="sell", code="990006", qty=10, price=None, trde_tp="3", attempt=1,
                               kind="점검용", reason="손절", assumed_kind="stop")
         res.om.store.update(it, status=O.ACCEPTED, filled_qty=10, fill_price=px, created=created)
 

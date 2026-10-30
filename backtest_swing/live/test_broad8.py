@@ -43,13 +43,13 @@ def synced_prev(test, held_base, intents=None, start=None):
 class JudgeFirst(Base6):
     def trend_pos(self):
         P.save(self.R.POSITIONS, pos_with())                                       # 15:30 1분봉 추세 거짓
-        self.fk.balance_rows = [bal_row("084670", 28)]
+        self.fk.balance_rows = [bal_row("990006", 28)]
 
     def test_judge_published_before_slow_model_load(self):
         import run_day as RD
         self.trend_pos()
         res = self.started("08:25:00", live=False)
-        self.judged["084670"] = {"close": 31000.0, "stop": 30000.0, "trend": True, "basis": "수정주가 일봉"}
+        self.judged["990006"] = {"close": 31000.0, "stop": 30000.0, "trend": True, "basis": "수정주가 일봉"}
         gate, saved = threading.Event(), RD.prepare
 
         def slow(day):
@@ -64,10 +64,10 @@ class JudgeFirst(Base6):
             res.judge = lambda *a, **k: (_ for _ in ()).throw(AssertionError("주 스레드에서 계산"))
             res.tick(self.clk())
             p = jl(self.R.POSITIONS)
-            self.assertEqual(p["sell_duty"]["084670"]["kind"], "trend")              # 공식 참 -> 08:30 전에 적용
+            self.assertEqual(p["sell_duty"]["990006"]["kind"], "trend")              # 공식 참 -> 08:30 전에 적용
             self.clk.at("08:30:00")
             res.tick(self.clk())
-            self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["084670"])   # 기다리지 않고 바로
+            self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])   # 기다리지 않고 바로
         finally:
             gate.set()
             res.prep_thread.join(5)
@@ -75,22 +75,22 @@ class JudgeFirst(Base6):
         self.assertIn("FileNotFoundError", res.prep_result["error"])
 
     def test_wait_limit_0850(self):
-        duty = {"084670": O.new_duty("trend", "2026-10-23 15:41:00", "추세 매도 (2026-10-23 종가 < 20일선, 15:30 1분봉)")}
-        P.save(self.R.POSITIONS, pos_with(dict(HELD, trend_sell_next_open=True), duty, {"084670": {"since": "2026-10-23", "attempts": 0}}))
-        self.fk.balance_rows = [bal_row("084670", 28)]
+        duty = {"990006": O.new_duty("trend", "2026-10-23 15:41:00", "추세 매도 (2026-10-23 종가 < 20일선, 15:30 1분봉)")}
+        P.save(self.R.POSITIONS, pos_with(dict(HELD, trend_sell_next_open=True), duty, {"990006": {"since": "2026-10-23", "attempts": 0}}))
+        self.fk.balance_rows = [bal_row("990006", 28)]
         res = self.started("08:49:30", live=False)
         self.assertEqual(res.tick(self.clk()), "trend_wait")
         self.assertEqual(res.day.s["trend_wait"]["until"], "08:50:00")
         self.clk.at("08:50:00")
         res.tick(self.clk())
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["084670"])
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])
 
 
 # ---------------------------------------------------------------- 4 점검 모드 종료일: 체결 시각 기준
 
 class CheckModeFillTime(Base6):
     def sell(self, res, created, fill_time, px):
-        it = res.om.store.add(date="2026-10-26", stage="stop", side="sell", code="084670", qty=10, price=None, trde_tp="3", attempt=1,
+        it = res.om.store.add(date="2026-10-26", stage="stop", side="sell", code="990006", qty=10, price=None, trde_tp="3", attempt=1,
                               kind="점검용", reason="손절", assumed_kind="stop")
         res.om.store.update(it, status=O.ACCEPTED, filled_qty=10, fill_price=px, created=created, fill_time=fill_time)
 

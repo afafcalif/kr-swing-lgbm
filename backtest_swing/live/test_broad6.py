@@ -25,12 +25,12 @@ import positions as P  # noqa: E402
 import quotes as Q  # noqa: E402
 import state as S  # noqa: E402
 
-HELD = {"qty": 28, "trade_id": "084670-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 30000.0, "stop_basis": "진입일", "kind": "본래",
+HELD = {"qty": 28, "trade_id": "990006-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 30000.0, "stop_basis": "진입일", "kind": "본래",
         "judged_on": "2026-10-23", "judged_by": "15:30 1분봉", "close_1530": 33000.0, "trend_sell_next_open": False}
 
 
 def pos_with(held=None, duty=None, nos=None):
-    return {"held": {"084670": dict(held or HELD)}, "sell_duty": duty or {}, "next_open_sells": nos or {}, "trade_seq": 1, "duty_format": P.DUTY_FORMAT}
+    return {"held": {"990006": dict(held or HELD)}, "sell_duty": duty or {}, "next_open_sells": nos or {}, "trade_seq": 1, "duty_format": P.DUTY_FORMAT}
 
 
 class Base6(Base):
@@ -142,8 +142,8 @@ class SpecialHours(Base6):
         self.assertEqual((res.om.t["stop_from"], res.om.t["buy_from"], res.om.t["no_new_order_after"]), ("10:00:00", "16:21:00", "16:28:00"))
         self.assertTrue(any(a.startswith("[거래시간 변경일] 2026-11-19") and "KRX 공지로 확인 필요" in a for a in self.alerts))
         self.assertEqual(res.day.s["special_hours"]["times"]["settle"], "16:40:00")
-        self.assertEqual(res.om.detect_stops({"084670": {"cur_price": 1.0}}, {"084670": 2.0}, at="09:59:30"), {})   # 10:00 전에는 감지 안 함
-        self.assertIn("084670", res.om.detect_stops({"084670": {"cur_price": 1.0}}, {"084670": 2.0}, at="16:20:30"))  # 16:20 분까지 감지
+        self.assertEqual(res.om.detect_stops({"990006": {"cur_price": 1.0}}, {"990006": 2.0}, at="09:59:30"), {})   # 10:00 전에는 감지 안 함
+        self.assertIn("990006", res.om.detect_stops({"990006": {"cur_price": 1.0}}, {"990006": 2.0}, at="16:20:30"))  # 16:20 분까지 감지
         self.clk.at("16:22:00")
         self.assertTrue(res.om.in_window((res.om.t["buy_from"], res.om.t["no_new_order_after"], False)))
         self.assertTrue(res.tick(self.clk()) not in ("idle",))                       # 16:30 뒤에도 하루가 끝나지 않음 (17:30)
@@ -161,7 +161,7 @@ class SpecialHours(Base6):
                         for h in ("1529", "1530", "1600", "1630", "1631", "1700")]
                 return {"stk_min_pole_chart_qry": rows}, "N", ""
         saved = self.saved[11]                                                     # Base 가 가짜로 바꾼 bars_today 말고 원래 함수
-        b = saved(Cl(), "084670", pd.Timestamp("2026-11-19"))
+        b = saved(Cl(), "990006", pd.Timestamp("2026-11-19"))
         self.assertEqual(b.ts.str[8:12].tolist(), ["1529", "1530", "1600", "1630"])  # 16:30 봉까지 (평소는 15:30)
         self.assertEqual(S.close_hhmm("2026-11-18"), "1530")
         self.assertFalse(U.allowed(pd.Timestamp("2026-11-19 16:00:00")))             # 장중 (평소면 15:45 뒤라 허용)
@@ -173,53 +173,53 @@ class SpecialHours(Base6):
 
 class OfficialRejudge(Base6):
     def test_trend_false_releases_unsent_duty(self):
-        duty = {"084670": O.new_duty("trend", "2026-10-23 15:41:00", "추세 매도 (2026-10-23 종가 < 20일선, 15:30 1분봉)")}
-        P.save(self.R.POSITIONS, pos_with(dict(HELD, trend_sell_next_open=True), duty, {"084670": {"since": "2026-10-23", "attempts": 0}}))
+        duty = {"990006": O.new_duty("trend", "2026-10-23 15:41:00", "추세 매도 (2026-10-23 종가 < 20일선, 15:30 1분봉)")}
+        P.save(self.R.POSITIONS, pos_with(dict(HELD, trend_sell_next_open=True), duty, {"990006": {"since": "2026-10-23", "attempts": 0}}))
         res = self.started("08:20:00", live=False)
-        self.judged["084670"] = {"close": 34000.0, "stop": 30000.0, "trend": False, "basis": "수정주가 일봉"}
+        self.judged["990006"] = {"close": 34000.0, "stop": 30000.0, "trend": False, "basis": "수정주가 일봉"}
         res.official_vs_1530()
         p = jl(self.R.POSITIONS)
-        self.assertEqual((p["sell_duty"], p["next_open_sells"], p["held"]["084670"]["trend_sell_next_open"]), ({}, {}, False))
+        self.assertEqual((p["sell_duty"], p["next_open_sells"], p["held"]["990006"]["trend_sell_next_open"]), ({}, {}, False))
         self.assertEqual(res.day.s["official_vs_1530"]["diffs"][0]["applied"], "추세 매도 의무 해제")
         self.assertTrue(any(a.startswith("[공식 일봉 재판단]") for a in self.alerts))
 
     def test_trend_false_keeps_duty_if_already_sent(self):
-        duty = {"084670": O.new_duty("trend", "2026-10-23 15:41:00", "추세")}
-        P.save(self.R.POSITIONS, pos_with(dict(HELD, trend_sell_next_open=True), duty, {"084670": {"since": "2026-10-23", "attempts": 1}}))
+        duty = {"990006": O.new_duty("trend", "2026-10-23 15:41:00", "추세")}
+        P.save(self.R.POSITIONS, pos_with(dict(HELD, trend_sell_next_open=True), duty, {"990006": {"since": "2026-10-23", "attempts": 1}}))
         res = self.started("08:40:00", live=False)
-        it = res.om.store.add(date="2026-10-26", stage="trend_sell", side="sell", code="084670", qty=28, price=None, trde_tp="3", attempt=1,
+        it = res.om.store.add(date="2026-10-26", stage="trend_sell", side="sell", code="990006", qty=28, price=None, trde_tp="3", attempt=1,
                               kind="본래", reason="추세", assumed_kind="open")
         res.om.store.update(it, status=O.ACCEPTED, ord_no="T1")
-        self.judged["084670"] = {"close": 34000.0, "stop": 30000.0, "trend": False, "basis": "수정주가 일봉"}
+        self.judged["990006"] = {"close": 34000.0, "stop": 30000.0, "trend": False, "basis": "수정주가 일봉"}
         res.official_vs_1530()
-        self.assertIn("084670", jl(self.R.POSITIONS)["sell_duty"])
+        self.assertIn("990006", jl(self.R.POSITIONS)["sell_duty"])
         self.assertIn("의무 유지", res.day.s["official_vs_1530"]["diffs"][0]["applied"])
 
     def test_entry_day_stop_replaced_by_official(self):
         P.save(self.R.POSITIONS, pos_with(dict(HELD, entry_date="2026-10-23", trend_sell_next_open=False)))
         res = self.started("08:20:00", live=False)
-        self.judged["084670"] = {"close": 33000.0, "stop": 29000.0, "trend": True, "basis": "수정주가 일봉"}
+        self.judged["990006"] = {"close": 33000.0, "stop": 29000.0, "trend": True, "basis": "수정주가 일봉"}
         res.official_vs_1530()
-        h = jl(self.R.POSITIONS)["held"]["084670"]
+        h = jl(self.R.POSITIONS)["held"]["990006"]
         self.assertEqual((h["stop_price"], h["judged_by"], h["trend_sell_next_open"]), (29000.0, "공식 일봉 (다음 날 재판단)", False))  # 진입일 당일 추세 판정 안 함
         self.assertIn("15:30 1분봉 값 30000", h["stop_basis"])
 
     def test_tick_applies_prep_result_before_0830_trend_sell(self):
         P.save(self.R.POSITIONS, pos_with())
-        self.fk.balance_rows = [bal_row("084670", 28)]
+        self.fk.balance_rows = [bal_row("990006", 28)]
         res = self.started("08:25:00", live=False)
         out = prep_out()
         out["recovery"] = None
-        out["official_judge"] = {"084670": {"close": 32000.0, "stop": 30000.0, "trend": True, "basis": "수정주가 일봉"}, "_missing": []}
+        out["official_judge"] = {"990006": {"close": 32000.0, "stop": 30000.0, "trend": True, "basis": "수정주가 일봉"}, "_missing": []}
         res.prep_thread, res.prep_result, res.prep_reason = object(), out, "공식 시세 반영 뒤 다시 적재"
         res.judge = lambda *a, **k: (_ for _ in ()).throw(AssertionError("주 스레드에서 계산"))
         res.tick(self.clk())
         p = jl(self.R.POSITIONS)
-        self.assertEqual((p["sell_duty"]["084670"]["kind"], p["held"]["084670"]["judged_by"]), ("trend", "공식 일봉 (다음 날 재판단)"))
+        self.assertEqual((p["sell_duty"]["990006"]["kind"], p["held"]["990006"]["judged_by"]), ("trend", "공식 일봉 (다음 날 재판단)"))
         self.assertFalse([e for e in res.day.s.get("errors", []) if "계산" in str(e)])
         self.clk.at("08:30:00")
         res.tick(self.clk())
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["084670"])      # 08:30 추세 매도에 들어감
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])      # 08:30 추세 매도에 들어감
 
     def test_official_retry_every_2min_before_0830(self):
         from kiwoom import krx_official
@@ -254,7 +254,7 @@ class StaleQuotes(Base6):
 
     def test_stale_quote_no_stop_and_requeried_next_minute(self):
         P.save(self.R.POSITIONS, pos_with())
-        self.fk.balance_rows = [bal_row("084670", 28)]
+        self.fk.balance_rows = [bal_row("990006", 28)]
         res = self.started("10:00:00", live=False)
         rows = {"dt": "20261023", "tm": "151500"}
         asked = []
@@ -262,12 +262,12 @@ class StaleQuotes(Base6):
             {"code": list(codes), "close": [20000.0] * len(codes), "dt": rows["dt"], "cntr_tm": rows["tm"]}), {})
         res.stop_minute()
         self.assertEqual(sends(self.fk, "kt10001"), [])                              # 어제 시세 20000 < 손절가 30000 이어도 팔지 않음
-        self.assertEqual(res.day.s["stale_quotes"]["084670"]["n"], 1)
+        self.assertEqual(res.day.s["stale_quotes"]["990006"]["n"], 1)
         rows.update(dt="20261026", tm="100059")
         self.clk.at("10:01:00")
         res.stop_minute()
-        self.assertEqual(asked, [["084670"], ["084670"]])                            # 다음 분에 다시 조회
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["084670"])
+        self.assertEqual(asked, [["990006"], ["990006"]])                            # 다음 분에 다시 조회
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])
 
 
 # ---------------------------------------------------------------- 5 종목 일봉 누락
@@ -304,18 +304,18 @@ class CorruptIntents(unittest.TestCase):
         open(p, "w").write('[{"intent_id": "x", "status": "ACCEPT')
         clk, notes = FakeClock("2026-10-26 10:00:00"), []
         fk = FakeKiwoom(clk)
-        fk.balance_rows = [bal_row("084670", 28)]
+        fk.balance_rows = [bal_row("990006", 28)]
         om = O.OrderManager(O.Broker(fk, allow_orders=True), clock=clk, sleep=clk.sleep, notify=notes.append, store=O.IntentStore(p, clock=clk))
         self.assertTrue(om.store.corrupt)
-        duty = {"084670": O.new_duty("stop", "2026-10-26 09:59:00", "현재가 < 손절가", price=1.0, stop=2.0)}
-        r = om.send_duties(duty, {"084670": {"file_qty": 28, "acct": None}})        # 계좌 조회 실패: 걸린 매도를 몰라 안 보냄
+        duty = {"990006": O.new_duty("stop", "2026-10-26 09:59:00", "현재가 < 손절가", price=1.0, stop=2.0)}
+        r = om.send_duties(duty, {"990006": {"file_qty": 28, "acct": None}})        # 계좌 조회 실패: 걸린 매도를 몰라 안 보냄
         self.assertIn("의도 파일 손상", r[0]["skipped"])
-        r = om.send_duties(duty, {"084670": {"file_qty": 28, "acct": {"qty": 28, "sellable": 28}}})
+        r = om.send_duties(duty, {"990006": {"file_qty": 28, "acct": {"qty": 28, "sellable": 28}}})
         self.assertEqual(r[0]["status"], O.ACCEPTED)                                # 계좌 매도 가능 수량으로 매도
         clk.t = pd.Timestamp("2026-10-26 15:22:00")
         b = om.place_buys(PLAN, "본래")
         self.assertIn("매수 막음", b[0]["skipped"])
-        self.assertEqual([x[2]["stk_cd"] for x in sends(fk, "kt10001")], ["084670"])
+        self.assertEqual([x[2]["stk_cd"] for x in sends(fk, "kt10001")], ["990006"])
         self.assertEqual(sends(fk), [])
         self.assertTrue(any("매도 의무" in n and "주문 차단" in n for n in notes))
 
@@ -329,7 +329,7 @@ class CheckModeEnd(Base6):
     def test_end_on_first_filter_day_and_separate_perf(self):
         P.save(self.R.POSITIONS, pos_with(dict(HELD, kind="점검용", qty=10)))
         res = self.started("15:19:00", live=False)
-        rec = res.end_check_mode(30_000_000.0, {"084670": {"qty": 10, "cur_price": 1000.0}}, {"084670": 1100.0})
+        rec = res.end_check_mode(30_000_000.0, {"990006": {"qty": 10, "cur_price": 1000.0}}, {"990006": 1100.0})
         self.assertEqual((rec["ended"], rec["start_equity"], rec["check_value_at_end"]), ("2026-10-26", 30_000_000.0, 11000.0))
         self.assertTrue(any(a.startswith("[점검 모드 종료] 2026-10-26") for a in self.alerts))
         self.assertTrue(jl(self.R.check_mode_path())["ended"])
@@ -337,7 +337,7 @@ class CheckModeEnd(Base6):
         self.assertTrue(any("점검 모드 종료" in w for w in res.buy_gate()))
         res.day.set("live", {"plan": [], "kind": "본래"})
         self.assertFalse(any("점검 모드 종료" in w for w in res.buy_gate()))
-        it = res.om.store.add(date="2026-10-26", stage="trend_late", side="sell", code="084670", qty=10, price=None, trde_tp="3", attempt=1,
+        it = res.om.store.add(date="2026-10-26", stage="trend_late", side="sell", code="990006", qty=10, price=None, trde_tp="3", attempt=1,
                               kind="점검용", reason="추세", assumed_kind="open")
         res.om.store.update(it, status=O.ACCEPTED, filled_qty=10, fill_price=1200.0)
         P.save(self.R.POSITIONS, {"held": {}, "sell_duty": {}, "next_open_sells": {}, "trade_seq": 1, "duty_format": P.DUTY_FORMAT})

@@ -27,20 +27,20 @@ import state as S  # noqa: E402
 class Recovery(Base):
     # ---------------------------------------------------------------- 1
     def setup_overnight(self, sell_qty, sell_fill=None):
-        """10-23: 시작 보유 084670 28주(거래 084670-2026-10-20-1) -> 손절 매도 sell_qty 접수, 점검용 매수 28주 접수, 거래 정보 미확정.
+        """10-23: 시작 보유 990006 28주(거래 990006-2026-10-20-1) -> 손절 매도 sell_qty 접수, 점검용 매수 28주 접수, 거래 정보 미확정.
         sell_fill: 매도 체결 수량을 알면 그 수량 (15:35 확인으로 미체결 잔량까지 채움), None 이면 체결 수량 모름 (3차 확인 리뷰 R3)"""
         fill = {} if sell_fill is None else {"filled_qty": sell_fill, "unfilled_qty": sell_qty - sell_fill}
-        base = {"084670": {"qty": 28, "trade_id": "084670-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 30000.0, "kind": "본래"}}
-        day_state(self.tmp, "2026-10-23", self.clk, steps=("settle", "ac_summary"), positions_start={"held": {"084670": 28}},
+        base = {"990006": {"qty": 28, "trade_id": "990006-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 30000.0, "kind": "본래"}}
+        day_state(self.tmp, "2026-10-23", self.clk, steps=("settle", "ac_summary"), positions_start={"held": {"990006": 28}},
                   positions_baseline={"held": base, "trade_seq": 1})
         intents_file(self.tmp, "2026-10-23", [
-            {"intent_id": "s1", "date": "2026-10-23", "stage": "stop", "side": "sell", "code": "084670", "qty": sell_qty, "trde_tp": "3",
+            {"intent_id": "s1", "date": "2026-10-23", "stage": "stop", "side": "sell", "code": "990006", "qty": sell_qty, "trde_tp": "3",
              "status": "ACCEPTED", "ord_no": "S1", "filled_qty": 0, "pre_qty": 28, "held_qty_before": 28, "kind": "본래", **fill},
-            {"intent_id": "b1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "084670", "qty": 28, "trde_tp": "0",
+            {"intent_id": "b1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "990006", "qty": 28, "trde_tp": "0",
              "status": "ACCEPTED", "ord_no": "B1", "filled_qty": 0, "pre_qty": 0, "kind": "점검용"}])
-        P.save(self.R.POSITIONS, {"held": {"084670": {**base["084670"], "info_pending": True, "pending_since": "2026-10-23"}},
+        P.save(self.R.POSITIONS, {"held": {"990006": {**base["990006"], "info_pending": True, "pending_since": "2026-10-23"}},
                                   "next_open_sells": {}, "trade_seq": 1})
-        self.fk.balance_rows = [bal_row("084670", 28, avg=33000)]
+        self.fk.balance_rows = [bal_row("990006", 28, avg=33000)]
         res = self.started("07:10:00")
         res.day.s["steps"].pop("prev_settle")
         return res
@@ -48,29 +48,29 @@ class Recovery(Base):
     def test_1_overnight_rebuy_after_full_sell_is_new_trade(self):
         res = self.setup_overnight(sell_qty=28, sell_fill=28)                    # 3차 R3: 전량 매도는 체결 수량으로 (모르면 미확정, test_third)
         r = res.prev_settle()
-        p = jl(self.R.POSITIONS)["held"]["084670"]
-        self.assertEqual((p["trade_id"], p["entry_date"], p["kind"], p["stop_temp"]), ("084670-2026-10-23-2", "2026-10-23", "점검용", True))
+        p = jl(self.R.POSITIONS)["held"]["990006"]
+        self.assertEqual((p["trade_id"], p["entry_date"], p["kind"], p["stop_temp"]), ("990006-2026-10-23-2", "2026-10-23", "점검용", True))
         self.assertFalse(p.get("info_pending") or p.get("provisional_new") or p.get("pending_since"))
-        self.assertIn("새 거래", r["rebuilt"]["084670"]["how"])
+        self.assertIn("새 거래", r["rebuilt"]["990006"]["how"])
 
     def test_1_partial_sell_keeps_start_of_day_trade(self):
         res = self.setup_overnight(sell_qty=10)
         res.prev_settle()
-        p = jl(self.R.POSITIONS)["held"]["084670"]
-        self.assertEqual((p["trade_id"], p["entry_date"], p["stop_price"], p["kind"]), ("084670-2026-10-20-1", "2026-10-20", 30000.0, "본래"))
+        p = jl(self.R.POSITIONS)["held"]["990006"]
+        self.assertEqual((p["trade_id"], p["entry_date"], p["stop_price"], p["kind"]), ("990006-2026-10-20-1", "2026-10-20", 30000.0, "본래"))
         self.assertFalse(p.get("info_pending"))
 
     # ---------------------------------------------------------------- 2
     def test_2_unknown_buy_judged_by_pre_qty_not_updated_positions(self):
         day_state(self.tmp, "2026-10-23", self.clk, steps=("settle",), positions_start={"held": {}})
         intents_file(self.tmp, "2026-10-23", [
-            {"intent_id": "b1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "084670", "qty": 28, "status": "UNKNOWN", "pre_qty": 0,
+            {"intent_id": "b1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "990006", "qty": 28, "status": "UNKNOWN", "pre_qty": 0,
              "kind": "본래"},
             {"intent_id": "b2", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "005930", "qty": 5, "status": "UNKNOWN", "kind": "본래"}])
         # 보유 장부는 이미 계좌 수량으로 갱신돼 있음 (예전 방식이면 28 > 28 이 아니라서 NOT_SENT 로 잘못 확정)
-        P.save(self.R.POSITIONS, {"held": {"084670": {"qty": 28, "entry_date": "2026-10-23", "stop_price": 1.0},
+        P.save(self.R.POSITIONS, {"held": {"990006": {"qty": 28, "entry_date": "2026-10-23", "stop_price": 1.0},
                                            "005930": {"qty": 5, "entry_date": "2026-10-23", "stop_price": 1.0}}, "next_open_sells": {}})
-        self.fk.balance_rows = [bal_row("084670", 28), bal_row("005930", 5)]
+        self.fk.balance_rows = [bal_row("990006", 28), bal_row("005930", 5)]
         res = self.started("07:10:00")
         res.day.s["steps"].pop("prev_settle")
         res.prev_settle()
@@ -87,7 +87,7 @@ class Recovery(Base):
         self.assertEqual(res.day.s["positions_start"]["held"], {"005930": 3})
         self.clk.at("15:22:00")
         res.buy()
-        self.assertEqual(res.om.records[0]["pre_qty"], 0)                        # 084670 은 주문 직전 0주
+        self.assertEqual(res.om.records[0]["pre_qty"], 0)                        # 990006 은 주문 직전 0주
         self.clk.at("10:00:00")
         om = O.OrderManager(O.Broker(self.fk, allow_orders=True), clock=self.clk, sleep=self.clk.sleep)
         O.stop_cycle(om, O.AccountWatch(), {"held": {"005930": {"qty": 3, "stop_price": 99999.0}}}, lambda cs: {c: 100.0 for c in cs},
@@ -114,7 +114,7 @@ class Recovery(Base):
     def test_3_recovery_scans_recent_days_even_if_completed(self):
         for x in ("2026-10-21", "2026-10-22", "2026-10-23"):
             day_state(self.tmp, x, self.clk, steps=("after_close",))
-        intents_file(self.tmp, "2026-10-21", [{"intent_id": "s1", "date": "2026-10-21", "stage": "stop", "side": "sell", "code": "084670", "qty": 10,
+        intents_file(self.tmp, "2026-10-21", [{"intent_id": "s1", "date": "2026-10-21", "stage": "stop", "side": "sell", "code": "990006", "qty": 10,
                                               "status": "UNKNOWN", "pre_qty": 10, "kind": "본래"}])
         res = self.started("07:10:00")
         res.day.s["steps"].pop("prev_settle")

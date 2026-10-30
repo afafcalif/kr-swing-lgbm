@@ -23,7 +23,7 @@ import orders as O  # noqa: E402
 import settings  # noqa: E402
 
 LIMITS = json.load(open(settings.EXAMPLE, encoding="utf-8"))["rate_limits"]
-PLAN3 = [dict(PLAN[0], code=c) for c in ("990001", "990002", "084670")]
+PLAN3 = [dict(PLAN[0], code=c) for c in ("990001", "990002", "990006")]
 
 
 class Gate(unittest.TestCase):
@@ -72,7 +72,7 @@ class Gate(unittest.TestCase):
         self.clk.t = pd.Timestamp("2026-10-28 10:00:00")
         self.fk.min_gap = {"kt10001": 1.0, "kt00018": 1.0}
         self.fk.page_size = 1
-        codes = ["990001", "990002", "084670"]
+        codes = ["990001", "990002", "990006"]
         self.fk.balance_rows = [bal_row(c, 10) for c in codes]
         om = self.om()
         bal = O.Broker(self.fk, env="mock").balance()                           # 3쪽
@@ -97,7 +97,7 @@ class Gate(unittest.TestCase):
         """kt00018 유량 오류(HTTP 429·return_code 5 + 빈 목록) = 조회 실패. 보유 0 으로 읽어 매도 의무를 끝내거나 수동 확인을 걸지 않음"""
         self.gate(False)
         self.clk.t = pd.Timestamp("2026-10-28 10:00:00")
-        self.fk.balance_rows = [bal_row("084670", 28)]
+        self.fk.balance_rows = [bal_row("990006", 28)]
         self.fk.min_gap = {"kt00018": 1.0}
         b = O.Broker(self.fk, env="mock")
         b.balance()
@@ -115,15 +115,15 @@ class Gate(unittest.TestCase):
         fk2 = RateEmpty(self.clk)
         om = O.OrderManager(O.Broker(fk2, allow_orders=True), clock=self.clk, sleep=self.clk.sleep)
         duty = O.new_duty("trend", "2026-10-27 15:41:00", "추세")
-        pos = {"held": {"084670": {"qty": 28, "stop_price": 30000.0}}, "sell_duty": {"084670": dict(duty)}, "next_open_sells": {}}
+        pos = {"held": {"990006": {"qty": 28, "stop_price": 30000.0}}, "sell_duty": {"990006": dict(duty)}, "next_open_sells": {}}
         watch = O.AccountWatch()
         for t in ("10:00:00", "10:01:30"):                                         # 1분 넘게 두 번 -> 성공이었다면 의무가 끝났을 것
             self.clk.at(t)
             r = O.stop_cycle(om, watch, pos, lambda cs, deadline=None: {}, lambda: om.b.balance(quick=True), self.clk(), set())
             self.assertFalse(r["account_ok"])
             self.assertEqual((r["qty_changed"], r["duty_ended"], r["duty_zero"]), ({}, [], []))
-        self.assertIn("084670", pos["sell_duty"])
-        self.assertNotIn("zero_at", pos["sell_duty"]["084670"])
+        self.assertIn("990006", pos["sell_duty"])
+        self.assertNotIn("zero_at", pos["sell_duty"]["990006"])
 
     def test_buy_429_retries_only_before_1528(self):
         self.gate(False)

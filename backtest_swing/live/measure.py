@@ -94,7 +94,7 @@ def backfill(date):
     idx_b = index_upto(caller, day)
     rows_b = rows_upto(bars)
     b, cols, _, chk = M.load(day.strftime("%Y-%m"))
-    pool = E.ShardPool(sd.universe_codes(), n=12, use_append=True)
+    pool = E.ShardPool(sd.universe_codes(), use_append=True)
     try:
         res = top3_compare(pool, day, index_series(), b, cols, log["ledger_before"], rows_a, st["measure_snapshot"]["index_values"], rows_b, idx_b)
     finally:

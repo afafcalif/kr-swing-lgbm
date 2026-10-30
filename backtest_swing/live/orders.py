@@ -65,6 +65,17 @@ def num(x):
         return float("nan")
 
 
+def fill_costs(fx):
+    """11O: ka10076 주문 행의 당일매매수수료(tdy_trde_cmsn)·당일매매세금(tdy_trde_tax), 원. 모든 행에 숫자로 있을 때만 (기록용, 현금 대조에서
+    규칙 계산과 나란히 보여 줌 — 기대 예수금 계산에는 쓰지 않음)"""
+    out = {}
+    for k, name in (("tdy_trde_cmsn", "fee_won"), ("tdy_trde_tax", "tax_won")):
+        v = [num(x.get(k)) for x in fx if str(x.get(k) if x.get(k) is not None else "").strip()]
+        if fx and len(v) == len(fx) and all(np.isfinite(y) for y in v):
+            out[name] = float(sum(v))
+    return out
+
+
 def code_of(x):
     s = str(x or "").strip()
     return s[1:] if s[:1] == "A" and len(s) == 7 else s.replace("_AL", "").replace("_NX", "")
@@ -381,12 +392,24 @@ def new_duty(kind, since, reason, **kw):
 ZERO_CONFIRM_SEC = 60  # 11J 보완 3 R1: 보유 0 을 이 간격(초) 이상 두고 두 번 연속 확인해야 의무 끝
 
 
+def closed_codes(positions, day):
+    """11N: 오늘(day) 매도 의무가 계좌 보유 0 두 번으로 끝난 종목 (positions["closed_today"], 15:40 보유 갱신 전까지 보유 파일에 남은 판 종목).
+    날짜가 다른 표시는 무효"""
+    day = str(pd.Timestamp(day).date())
+    return {c for c, x in (positions.get("closed_today") or {}).items() if (x or {}).get("date") == day}
+
+
 def end_duties(positions, acct, now):
     """11J 보완 3 R1: 성공한 계좌 조회(acct = holdings, 모든 쪽을 받은 응답)에서 보유 0 이 ZERO_CONFIRM_SEC 이상 간격으로 두 번 연속일 때만
     매도 의무를 끝낸다 (다음 날 시가 매도 목록에서도 뺌). 첫 0 은 의무에 zero_at 으로 기록만, 그 사이 보유가 보이면 지움 (응답에서 한 번 빠진 종목).
-    반환: (끝난 종목, 이번에 처음 0 을 본 종목)"""
+    11N: 끝난 종목은 closed_today 로 표시 (15:40 전까지 새 손절 감지·매수 계획의 의무 판단·추세 매도에서 뺌). 계좌에 다시 보유가 보이거나
+    날짜가 지난 표시는 지움. 반환: (끝난 종목, 이번에 처음 0 을 본 종목)"""
     duty = positions.setdefault("sell_duty", {})
     now = pd.Timestamp(now)
+    closed = positions.get("closed_today") or {}
+    for c in list(closed):
+        if (closed[c] or {}).get("date") != f"{now:%Y-%m-%d}" or int((acct.get(c) or {}).get("qty", 0)) > 0:
+            closed.pop(c)  # 같은 날 다시 보유(재매수 등)면 원래대로
     ended, first = [], []
     for c, du in list(duty.items()):
         if int((acct.get(c) or {}).get("qty", 0)) > 0:
@@ -399,7 +422,10 @@ def end_duties(positions, acct, now):
         elif now - pd.Timestamp(z) >= pd.Timedelta(seconds=ZERO_CONFIRM_SEC):
             duty.pop(c)
             positions.get("next_open_sells", {}).pop(c, None)
+            positions.setdefault("closed_today", {})[c] = {"date": f"{now:%Y-%m-%d}", "at": f"{now:%H:%M:%S}", "kind": du.get("kind")}
             ended.append(c)
+    if "closed_today" in positions and not positions["closed_today"]:
+        positions.pop("closed_today")
     return ended, first
 
 
@@ -425,13 +451,14 @@ def duty_inputs(positions, codes, acct):
 
 
 def stop_cycle(om, watch, positions, quote_fn, balance_fn, now, mismatch_seen=None, detect=True, budget=None, on_trigger=None,
-               wall=time.time):
+               wall=time.time, before_detect=None):
     """1분 손절 감시 한 번 (2026-10-23 결정, 11J, 11J 보완 3). 보유 종목·손절가 = positions(상태 파일), 현재가 = quote_fn(codes[, deadline]).
     매도 의무 = positions["sell_duty"] (종목 코드 단위: 손절 진행 중·추세 매도). 증권사 잔고가 정답 (OrderManager.duty_sell).
     ① 계좌 조회 (balance_fn). 성공하면 보유 0 을 기록, 1분 이상 간격 두 번 연속 0 이면 의무를 끝냄 (end_duties)
     ② 의무 종목마다 같은 분 계좌 매도 가능 수량으로 시장가 (0 이면 걸린 주문 대기). 계좌 조회 실패면 걸린 매도가 없을 때만 보유 파일 수량
     ③ 새 손절 감지 (시세 조회, 감지 창은 이 감시가 시작된 시각 now, 의무가 있는 종목은 뺌). 새 의무는 on_trigger 로 먼저 저장(선기록)한 뒤 보냄
-    체결 조회는 하지 않는다. budget(초): 시세 조회의 대기 상한 (wall() 기준, 감시 시작부터). 반환: dict"""
+    체결 조회는 하지 않는다. budget(초): 시세 조회의 대기 상한 (wall() 기준, 감시 시작부터). 반환: dict
+    11R C: before_detect(prices) 를 주면 시세 조회 뒤·새 손절 감지 전에 부른다 (그날 이벤트 손절가 조정). 돌려준 종목은 이번 분 새 손절 감지에서 뺌"""
     held_pos = {c: p for c, p in positions.get("held", {}).items() if p.get("qty", 0) > 0}
     duty = positions.setdefault("sell_duty", {})
     kind_of = lambda c: (positions.get("held", {}).get(c) or {}).get("kind", "본래")  # noqa: E731
@@ -457,15 +484,19 @@ def stop_cycle(om, watch, positions, quote_fn, balance_fn, now, mismatch_seen=No
     orders = om.send_duties(go, duty_inputs(positions, go, acct), kind_of)
     # ③ 새 손절 감지 (2026-10-24 F-01: 계좌 조회가 됐는데 계좌에 없으면 매도 대상에서 뺀다)
     not_in_acct = [c for c in held_pos if acct is not None and (c not in acct or acct[c]["qty"] <= 0)]
-    prices, quote_err, new = {}, None, {}
-    if held_pos and detect:
+    closed = closed_codes(positions, now)  # 11N: 오늘 판 종목 (계좌 조회 실패한 분에 보유 파일만 보고 다시 감지하지 않음)
+    prices, quote_err, new, base_paused = {}, None, {}, []
+    if detect and any(c not in closed for c in held_pos):
         try:
-            codes = sorted(held_pos)
+            codes = sorted(c for c in held_pos if c not in closed)
             prices = quote_fn(codes, deadline=wall_end) if wall_end else quote_fn(codes)
         except Exception as e:  # noqa: BLE001  (시세 조회 실패·시간 상한)
             quote_err = e
+        if before_detect is not None:  # 11R C: 이벤트 손절가 조정이 손절 판단보다 먼저 (기준가를 모르는 종목은 감지 안 함)
+            base_paused = sorted(before_detect(prices) or [])
         cand = {c: {"cur_price": float(prices[c])} for c in held_pos
-                if c not in duty and c not in not_in_acct and c not in stopped and c in prices and prices[c] > 0}
+                if c not in duty and c not in not_in_acct and c not in stopped and c not in closed and c in prices and prices[c] > 0
+                and c not in base_paused}
         stops = {c: p["stop_price"] for c, p in held_pos.items() if p.get("stop_price")}
         new = om.detect_stops(cand, stops, at=at)
         if new:
@@ -491,8 +522,8 @@ def stop_cycle(om, watch, positions, quote_fn, balance_fn, now, mismatch_seen=No
                 om.notify(f"[보유 불일치] 상태 파일 vs 계좌: {diff}")
     return {"orders": orders, "quotes": prices, "account_ok": acct is not None, "account_error": str(acct_err)[:150] if acct_err else None,
             "mismatch": diff, "not_in_account": not_in_acct, "triggered_new": new, "duties": sorted(duty), "duty_ended": ended,
-            "duty_zero": zero, "acct": acct, "qty_changed": changed, "review_paused": paused,
-            "quote_error": str(quote_err)[:150] if quote_err else None}
+            "duty_zero": zero, "acct": acct, "qty_changed": changed, "review_paused": paused, "closed_today": sorted(closed),
+            "quote_error": str(quote_err)[:150] if quote_err else None, "base_paused": base_paused}
 
 
 def unexplained_diff(state, acct, records, date):
@@ -1078,6 +1109,7 @@ class OrderManager:
             if q > 0:
                 upd["filled_qty"] = int(q)
                 upd["fill_price"] = float(sum(num(x.get("cntr_qty")) * num(x.get("cntr_pric")) for x in fx) / q)
+                upd.update(fill_costs(fx))
                 for k in FILL_TIME_KEYS:
                     if any(x.get(k) for x in fx):
                         upd["fill_time"] = max(str(x.get(k)) for x in fx if x.get(k))
@@ -1158,7 +1190,7 @@ class OrderManager:
             r["fills_checked"] = self.clock().strftime("%H:%M:%S")  # 3차 확인 리뷰 R3: 체결 조회가 된 주문 = 체결 수량을 앎 (0 포함)
             if q > 0 and int(q) != int(r.get("filled_qty") or 0):
                 upd = {"filled_qty": int(q), "fill_price": float(sum(num(x.get("cntr_qty")) * num(x.get("cntr_pric")) for x in fx) / q),
-                       "fill_refreshed": self.clock().strftime("%H:%M:%S")}
+                       "fill_refreshed": self.clock().strftime("%H:%M:%S"), **fill_costs(fx)}
                 for k in FILL_TIME_KEYS:
                     if any(x.get(k) for x in fx):
                         upd["fill_time"], upd["fill_time_field"] = max(str(x.get(k)) for x in fx if x.get(k)), k

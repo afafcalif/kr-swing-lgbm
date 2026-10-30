@@ -30,7 +30,7 @@ import orders as O  # noqa: E402
 import positions as P  # noqa: E402
 
 LIVE = os.path.dirname(os.path.abspath(__file__))
-POS = {"084670": {"qty": 28, "trade_id": "084670-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 30000.0, "kind": "본래"}}
+POS = {"990006": {"qty": 28, "trade_id": "990006-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 30000.0, "kind": "본래"}}
 STOP = O.new_duty("stop", "2026-10-26 09:30:00", "현재가 29900 < 손절가 30000", price=29900.0, stop=30000.0)
 
 
@@ -41,8 +41,8 @@ def setup(t="2026-10-26 10:00:00"):
     return clk, fk, om
 
 
-def positions(codes=("084670",), duty=STOP):
-    held = {c: {**POS["084670"], "trade_id": f"{c}-2026-10-20-1"} for c in codes}
+def positions(codes=("990006",), duty=STOP):
+    held = {c: {**POS["990006"], "trade_id": f"{c}-2026-10-20-1"} for c in codes}
     return {"held": held, "sell_duty": {c: dict(duty) for c in codes}, "next_open_sells": {}, "trade_seq": 1, "duty_format": P.DUTY_FORMAT}
 
 
@@ -55,27 +55,27 @@ class MissingOnce(unittest.TestCase):
 
     def test_holding_missing_once_in_account_response(self):
         clk, fk, om = setup()
-        fk.balance_rows = [bal_row("084670", 28, sellable=20)]
+        fk.balance_rows = [bal_row("990006", 28, sellable=20)]
         pos = positions()
         cycle(om, fk, pos)                                                        # 20 접수 (8 은 다른 곳에 묶임)
         clk.at("10:01:00")
         row = fk.balance_rows.pop()                                               # 응답에서 한 번 빠짐 (실제 보유는 있음)
         r = cycle(om, fk, pos)
-        self.assertEqual((r["duty_ended"], r["duty_zero"]), ([], ["084670"]))
-        self.assertEqual(pos["sell_duty"]["084670"]["zero_at"], "2026-10-26 10:01:00")
+        self.assertEqual((r["duty_ended"], r["duty_zero"]), ([], ["990006"]))
+        self.assertEqual(pos["sell_duty"]["990006"]["zero_at"], "2026-10-26 10:01:00")
         fk.balance_rows.append(row)
         fk.balance_rows[0]["trde_able_qty"] = "8"
         clk.at("10:02:00")
         r = cycle(om, fk, pos)                                                    # 다시 보임 -> 기록 지움, 남은 8 계속 매도
-        self.assertNotIn("zero_at", pos["sell_duty"]["084670"])
+        self.assertNotIn("zero_at", pos["sell_duty"]["990006"])
         self.assertEqual([int(c[2]["ord_qty"]) for c in sends(fk, "kt10001")], [20, 8])
 
     def test_two_zeros_need_one_minute_gap(self):
         pos = positions()
         acct = {}
-        self.assertEqual(O.end_duties(pos, acct, "2026-10-26 08:31:00"), ([], ["084670"]))
+        self.assertEqual(O.end_duties(pos, acct, "2026-10-26 08:31:00"), ([], ["990006"]))
         self.assertEqual(O.end_duties(pos, acct, "2026-10-26 08:31:30"), ([], []))       # 30초 뒤 = 아직 유지
-        self.assertEqual(O.end_duties(pos, acct, "2026-10-26 08:32:00"), (["084670"], []))
+        self.assertEqual(O.end_duties(pos, acct, "2026-10-26 08:32:00"), (["990006"], []))
         self.assertEqual(pos["sell_duty"], {})
 
 
@@ -84,14 +84,14 @@ class PartialPages(unittest.TestCase):
 
     def test_second_page_fails(self):
         clk, fk, om = setup()
-        fk.balance_rows = [bal_row("000660", 5), bal_row("084670", 28)]
+        fk.balance_rows = [bal_row("000660", 5), bal_row("990006", 28)]
         fk.page_size = 1
         pos = positions()
         fk.read_script["kt00018"] = ["ok", "http502"]                             # 1쪽(000660)만 받고 2쪽 실패
         r = cycle(om, fk, pos)
         self.assertFalse(r["account_ok"])
-        self.assertEqual((r["duty_zero"], r["duty_ended"]), ([], []))             # 084670 이 없는 것처럼 보이지 않음
-        self.assertNotIn("zero_at", pos["sell_duty"]["084670"])
+        self.assertEqual((r["duty_zero"], r["duty_ended"]), ([], []))             # 990006 이 없는 것처럼 보이지 않음
+        self.assertNotIn("zero_at", pos["sell_duty"]["990006"])
         self.assertEqual(sends(fk, "kt10001")[0][2]["ord_qty"], "28")             # 계좌 조회 실패 규칙 (걸린 매도 없음 -> 보유 파일)
 
     def test_cont_yn_without_next_key_is_failure(self):
@@ -107,26 +107,26 @@ class OldListNewTrade(Base):
     """R2: trade_id 없는 옛 형식(d4d6c64) 목록 항목은 날짜가 지금 보유 거래의 진입일보다 뒤일 때만 의무. 아니면 사람 확인 알림"""
 
     def test_d4d6c64_list_with_new_holding(self):
-        old = {"held": {"084670": {"qty": 28, "trade_id": "084670-2026-10-23-5", "entry_date": "2026-10-23", "stop_price": 1.0},   # 10-23 다시 산 새 거래
+        old = {"held": {"990006": {"qty": 28, "trade_id": "990006-2026-10-23-5", "entry_date": "2026-10-23", "stop_price": 1.0},   # 10-23 다시 산 새 거래
                         "000660": {"qty": 5, "trade_id": "000660-2026-10-20-2", "entry_date": "2026-10-20", "stop_price": 1.0},
                         "005930": {"qty": 10, "trade_id": "005930-2026-10-20-3", "entry_date": "2026-10-20", "stop_price": 1.0}},
-               "next_open_sells": {"084670": {"reason": "2026-10-23 손절 남음", "since": "2026-10-23", "attempts": 0},   # 이전 거래 것일 수 있음
+               "next_open_sells": {"990006": {"reason": "2026-10-23 손절 남음", "since": "2026-10-23", "attempts": 0},   # 이전 거래 것일 수 있음
                                    "000660": {"reason": "추세 매도", "since": "2026-10-23", "attempts": 0},          # 진입일 뒤 = 지금 거래
                                    "005930": {"reason": "예전 형식에서 옮김", "since": None, "attempts": 0}},         # 날짜 없음
                "trade_seq": 5}
         C.atomic_json(self.R.POSITIONS, old)
-        self.fk.balance_rows = [bal_row("084670", 28), bal_row("000660", 5), bal_row("005930", 10)]
+        self.fk.balance_rows = [bal_row("990006", 28), bal_row("000660", 5), bal_row("005930", 10)]
         res = self.started("08:31:00", live=False)
         pos = jl(self.R.POSITIONS)
         self.assertEqual(list(pos["sell_duty"]), ["000660"])
         self.assertEqual(list(pos["next_open_sells"]), ["000660"])
         need = [a for a in self.alerts if a.startswith("[매도 의무 확인 필요]")]
         self.assertEqual(len(need), 2)
-        self.assertTrue(any("084670" in a and "보유 파일 28주" in a and "계좌 28주" in a and "2026-10-23 손절 남음" in a for a in need))
+        self.assertTrue(any("990006" in a and "보유 파일 28주" in a and "계좌 28주" in a and "2026-10-23 손절 남음" in a for a in need))
         self.assertTrue(any("005930" in a for a in need))
-        self.assertEqual(sorted(res.day.s["duty_review"]["items"]), ["005930", "084670"])
+        self.assertEqual(sorted(res.day.s["duty_review"]["items"]), ["005930", "990006"])
         res.trend_sell()
-        self.assertEqual([c[2]["stk_cd"] for c in sends(self.fk, "kt10001")], ["000660"])   # 새 거래 084670 은 팔지 않음
+        self.assertEqual([c[2]["stk_cd"] for c in sends(self.fk, "kt10001")], ["000660"])   # 새 거래 990006 은 팔지 않음
 
 
 class StopFirst(Base):
@@ -134,7 +134,7 @@ class StopFirst(Base):
 
     def test_152850_slow_unknown_reconcile_after_stop(self):
         P.save(self.R.POSITIONS, positions())
-        self.fk.balance_rows = [bal_row("084670", 28)]
+        self.fk.balance_rows = [bal_row("990006", 28)]
         res = self.started("15:28:50", live=False)
         it = res.om.store.add(date="2026-10-26", stage="buy", side="buy", code="005930", qty=3, price=60000, trde_tp="0", attempt=1,
                               kind="본래", reason="매수 (P4)", assumed_kind="buy")

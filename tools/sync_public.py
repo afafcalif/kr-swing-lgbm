@@ -1,9 +1,11 @@
 """비공개 실행 저장소 → 이 공개 저장소 동기화 (허용 목록 방식).
 
-    python tools/sync_public.py --src <비공개 저장소 폴더> [--rev <커밋>]    # 복사 + 검사
-    python tools/sync_public.py --src <비공개 저장소 폴더> --check-only     # 검사만 (커밋 전)
+    python tools/sync_public.py --src <비공개 저장소 폴더> --held <기록 폴더> [--held ...] [--rev <커밋>]    # 복사 + 검사
+    python tools/sync_public.py --src <비공개 저장소 폴더> --held <기록 폴더> --check-only                  # 검사만 (커밋 전)
 
 - 비공개 저장소는 읽기만 한다: `git show <rev>:<경로>` 로 커밋된 내용을 읽는다 (작업 폴더·인덱스를 건드리지 않음).
+- --held 는 실제 장부·보유 장부·주문 기록이 있는 폴더 (logs/exec 또는 그 백업 사본). 거기 나온 종목 코드는 복사본에서
+  가짜 코드로 바꾸고, 저장소 검사에서도 남아 있으면 실패한다 (백테스트 결과 폴더 제외). 코드는 이 파일에 적지 않는다.
 - ALLOW 에 적은 파일만 복사한다. DENY 에 걸리는 경로는 ALLOW 에 있어도 복사하지 않고 실패한다.
 - 개인 경로·저장소 이름 같은 서술은 일반 표현으로 바꾼다 (REWRITE, PATH_REWRITE). 바꿀 곳이 없으면 실패
   (원본이 바뀐 것을 놓치지 않게).
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import json
 import os
 import re
 import shutil
@@ -29,8 +32,8 @@ LIVE = "backtest_swing/live/"
 ALLOW = [
     # 실행 코드
     *(LIVE + f for f in (
-        "__init__.py", "bar_timing.py", "common.py", "control.py", "daily.py", "engine.py", "firstrun.py",
-        "gapfill.py", "make_bundle.py", "measure.py", "model.py", "model_repro.py", "monthly.py", "notify.py", "orders.py",
+        "__init__.py", "backup.py", "bar_timing.py", "common.py", "control.py", "daily.py", "engine.py",
+        "features_eod.py", "firstrun.py", "gapfill.py", "make_bundle.py", "measure.py", "model.py", "model_repro.py", "monthly.py", "notify.py", "orders.py",
         "positions.py", "quotes.py", "replay.py", "resident.py", "run_day.py", "settings.py", "speed.py",
         "state.py", "update.py", "watchdog.py",
     )),
@@ -39,8 +42,12 @@ ALLOW = [
         "test_broad1.py", "test_broad2.py", "test_broad3.py", "test_broad4.py", "test_broad5.py",
         "test_broad6.py", "test_broad7.py", "test_broad8.py", "test_broad9.py", "test_broad10.py",
         "test_broad11.py", "test_broad12.py",
-        "test_codex.py", "test_confirm.py", "test_fix.py", "test_mock1.py", "test_orders.py", "test_safety.py",
-        "test_second.py", "test_third.py",
+        "test_backup.py", "test_basefactor.py", "test_closed.py", "test_codex.py", "test_confirm.py",
+        "test_failshare.py", "test_fetchfill.py", "test_fix.py", "test_fix11r.py", "test_intraday.py",
+        "test_memcash.py", "test_mock1.py", "test_orders.py", "test_rebase.py", "test_safety.py", "test_second.py",
+        "test_swap.py", "test_third.py",
+        # 시험용 고정 자료: 과거 일봉(일봉 파일 일부)·KRX 공식 시세 (공개 정보). 보유·주문 종목이면 --held 가림이 바꾼다
+        "testdata/rebase_real.json",
     )),
     # 스크립트·설정 예시·문서
     *(LIVE + f for f in (
@@ -93,7 +100,21 @@ REWRITE = [
     # 모의 주문 로그 인용의 종목 코드 (보유 종목이 드러나지 않게)
     ("backtest_swing/EXEC_SPEC.md", re.compile(r"15:21:01 \d{6} 전송 -> 15:21:02 \d{6} 전송"),
      "15:21:01 첫 매수 전송 -> 15:21:02 둘째 매수 전송"),
+    # 계좌 금액 (현금 대조 근거): 문서는 차이만 남기고, 시험은 두 값을 같은 만큼 옮긴다 (기대값이 전일 값에 1 대 1 이라 차이·허용치 그대로)
+    ("backtest_swing/EXEC_SPEC.md", re.compile(r"D\+2 추정예수금 [\d,]+ vs 기대 [\d,]+ \(차이 (\d+), 허용 (\d+)\)"),
+     lambda m: f"D+2 추정예수금이 기대값보다 {m.group(1)}원 많음, 허용 {m.group(2)}"),
+    ("backtest_swing/EXEC_SPEC.md", re.compile(r" 전일 D\+2 = [\d,]+\."), ""),
+    (LIVE + "test_memcash.py", re.compile(r"PREV_D2, ACTUAL_D2 = ([\d_]+)\.0, ([\d_]+)\.0"),
+     lambda m: "PREV_D2, ACTUAL_D2 = 10_000_000.0, {:_}.0  # 공개 사본: 계좌 금액 대신 같은 차이의 가짜 값".format(
+         10_000_000 - int(m.group(1).replace("_", "")) + int(m.group(2).replace("_", "")))),
 ]
+# 백업 공유 폴더·작업·계정 이름: 원본에서 읽어(이 파일에는 적지 않음) 복사본 전체에서 일반 표현으로 바꾼다. 못 찾으면 실패.
+NAME_SOURCES = {
+    "folder": (LIVE + "SETUP.md", re.compile(r"New-SmbShare -Name \S+ -Path (\S+)")),
+    "share": (LIVE + "SETUP.md", re.compile(r"New-SmbShare -Name (\S+) -Path")),
+    "task": (LIVE + "register_tasks.ps1", re.compile(r'Register-ScheduledTask -TaskName "([^"]+)" -Action \$ba\b')),
+    "account": (LIVE + "SETUP.md", re.compile(r"net user (\S+) \* /add")),
+}
 # 실제 모의 주문 종목 코드: 원본 문서의 로그 인용에서 읽어(이 파일에는 적지 않음) 복사본 전체에서 가짜 코드로 바꾼다.
 # (경로, 코드를 잡는 정규식). 못 찾으면 실패. REWRITE 보다 먼저 읽는다.
 MASK_CODES = [
@@ -124,6 +145,10 @@ LONG_TOKEN = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{32,}(?![A-Za-z0-
 # 숫자 8 ~ 11자리 연속 (계좌번호·채팅 ID 모양). 앞뒤가 숫자·영문·소수점·밑줄이면 제외 (해시·16진수·소수).
 DIGIT_RUN = re.compile(r"(?<![0-9A-Za-z_.])\d{8,11}(?![0-9A-Za-z_])")
 PLACEHOLDER_DIGITS = ("1234567890", "0123456789", "9876543210")  # 시험의 가짜 값
+# 검사에 걸리지만 괜찮은 값: 백업 시험의 가짜 .env 값·가짜 계좌번호, 기준가 시험의 공개 시세 거래대금
+KNOWN_OK = {"Zx9FakeValue_abcdefghijklmnopqrstuvwxyz0123", "81234567", "950465597"}
+# 숫자가 많은 공개 자료 (백테스트 결과·시험용 과거 일봉): 숫자·키 모양 규칙을 빼고 본다
+LIGHT_PREFIXES = ("backtest_swing/results/", LIVE + "testdata/")
 CHAT_ID = re.compile(r"(?i)chat[_ ]?id[\"']?\s*[:=]\s*[\"']?-?\d{5,}")
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
 EMAIL_OK = {"git@github.com"}  # SSH clone 주소의 사용자 이름
@@ -206,7 +231,7 @@ def scan_text(rel: str, text: str, ctx: dict) -> list[str]:
                 hit(i, m.start(), rule)
         for m in LONG_TOKEN.finditer(line):
             s = m.group(0)
-            if re.fullmatch(r"[0-9a-f]+|[0-9A-F]+", s):
+            if re.fullmatch(r"[0-9a-f]+|[0-9A-F]+", s) or s in KNOWN_OK:
                 continue
             if not (re.search(r"[a-z]", s) and re.search(r"[A-Z]", s) and re.search(r"\d", s)):
                 continue
@@ -216,11 +241,12 @@ def scan_text(rel: str, text: str, ctx: dict) -> list[str]:
             hit(i, m.start(), "key-like")
         for m in DIGIT_RUN.finditer(line):
             s = m.group(0)
-            if valid_yyyymmdd(s) or any(p.startswith(s) or s.startswith(p) for p in PLACEHOLDER_DIGITS):
+            if valid_yyyymmdd(s) or s in KNOWN_OK or any(p.startswith(s) or s.startswith(p) for p in PLACEHOLDER_DIGITS):
                 continue
             hit(i, m.start(), "digit-run-8-11")
         for m in CHAT_ID.finditer(line):
-            hit(i, m.start(), "chat-id")
+            if re.search(r"\d+$", m.group(0)).group(0) not in PLACEHOLDER_DIGITS:
+                hit(i, m.start(), "chat-id")
         for m in EMAIL.finditer(line):
             if m.group(0).lower() not in EMAIL_OK:
                 hit(i, m.start(), "email")
@@ -271,23 +297,85 @@ def report(title: str, hits) -> None:
         print(f"  {where} [{rule}]")
 
 
-def mask_codes(stage: Path) -> tuple[dict[str, str], list[str]]:
+def held_codes(dirs: list[str]) -> set[str]:
+    """--held 폴더(logs/exec 또는 그 백업 사본)의 장부·보유 장부·주문 기록에 나온 종목 코드 (실제 보유·주문 종목)"""
+    codes = set()
+
+    def walk(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                if k == "code" and isinstance(v, str):
+                    codes.add(v)
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    for d in map(Path, dirs):
+        files = [d / "ledger.json", *d.glob("state/positions.json*"), *d.glob("state/intents/*.json"),
+                 *d.glob("*/ledger.json"), *d.glob("*/state/positions.json*"), *d.glob("*/state/intents/*.json")]
+        for f in filter(Path.is_file, files):
+            o = json.loads(f.read_text(encoding="utf-8"))
+            walk(o)
+            if f.name.startswith("positions"):
+                for key in ("held", "closed_today"):
+                    codes.update(o.get(key) or {})
+        # 그날 로그의 장부 (지금 장부에는 없는 지난 보유도)
+        for f in [*d.glob("20??-??-??.json"), *d.glob("*/20??-??-??.json")]:
+            walk(json.loads(f.read_text(encoding="utf-8")).get("ledger_before") or {})
+    return {c for c in codes if re.fullmatch(r"\d{6}", c)}
+
+
+def mask_codes(stage: Path, held: set[str]) -> tuple[dict[str, str], list[str]]:
     errs, codes = [], []
     for p, rx in MASK_CODES:
         found = rx.findall((stage / p).read_bytes().decode("utf-8"))
         if not found:
             errs.append(f"{p}: 가릴 종목 코드가 원본에 없음 (MASK_CODES 항목 확인)")
         codes += [c for c in found if c not in codes]
+    present = set()
+    for p in ALLOW:
+        if is_text(p):
+            present.update(re.findall(r"(?<!\d)\d{6}(?!\d)", (stage / p).read_bytes().decode("utf-8")))
+    codes += sorted((held & present) - set(codes))
     return {c: str(MASK_BASE + i) for i, c in enumerate(codes)}, errs
 
 
-def apply_rewrites(stage: Path, src: Path) -> list[str]:
-    masks, errs = mask_codes(stage)
+def held_hits(root: Path, rels, held: set[str]) -> list[tuple[str, str]]:
+    """보유·주문 종목 코드가 남은 곳 (백테스트 결과 폴더는 예전부터 공개한 결과라 보지 않음)"""
+    rx = re.compile(r"(?<!\d)(?:" + "|".join(sorted(held)) + r")(?!\d)")
+    hits = []
+    for rel in rels:
+        for i, line in enumerate((root / rel).read_bytes().decode("utf-8", errors="replace").splitlines()):
+            hits += [(f"{rel}:{i + 1}:{m.start() + 1}", "held-code") for m in rx.finditer(line)]
+    return hits
+
+
+def local_names(src: Path, rev: str) -> tuple[dict[str, str], list[str]]:
+    names, errs = {}, []
+    for k, (p, rx) in NAME_SOURCES.items():
+        m = rx.search(git_show(src, rev, p).decode("utf-8"))
+        if m:
+            names[k] = m.group(1)
+        else:
+            errs.append(f"{p}: {k} 이름을 원본에서 못 찾음 (NAME_SOURCES 항목 확인)")
+    return names, errs
+
+
+def mask_names(t: str, names: dict[str, str]) -> str:
+    t = t.replace(names["folder"], "<백업 폴더>")
+    t = re.sub(r"(\\|-Name )" + re.escape(names["share"]) + r"(?![\w-])", lambda m: m.group(1) + "<공유 이름>", t)
+    t = re.sub(r"(?<![\w-])" + re.escape(names["task"]) + r"(?![\w-])", "<백업 작업>", t)
+    return re.sub(r"(?<![\w-])" + re.escape(names["account"]) + r"(?![\w-])", "<백업 계정>", t)
+
+
+def apply_rewrites(stage: Path, src: Path, held: set[str], names: dict[str, str]) -> list[str]:
+    masks, errs = mask_codes(stage, held)
     for p, old, new in REWRITE:
         f = stage / p
         t = f.read_bytes().decode("utf-8")
         if isinstance(old, re.Pattern):
-            t2, n = old.subn(lambda m: new, t)
+            t2, n = old.subn(new if callable(new) else (lambda m: new), t)
         else:
             n, t2 = t.count(old), t.replace(old, new)
         if not n:
@@ -307,13 +395,13 @@ def apply_rewrites(stage: Path, src: Path) -> list[str]:
         if not n:
             errs.append(f"{p}: 바꿀 경로가 원본에 없음 (PATH_REWRITE 항목 확인)")
         f.write_bytes(t.encode("utf-8"))
-    if masks:
-        rx = re.compile(r"(?<!\d)(" + "|".join(masks) + r")(?!\d)")
-        for p in ALLOW:
-            f = stage / p
-            if f.suffix.lower() in TEXT_EXT:
-                t = f.read_bytes().decode("utf-8")
-                f.write_bytes(rx.sub(lambda m: masks[m.group(1)], t).encode("utf-8"))
+    rx = re.compile(r"(?<!\d)(" + "|".join(masks) + r")(?!\d)") if masks else None
+    for p in ALLOW:
+        f = stage / p
+        if is_text(p):
+            t = f.read_bytes().decode("utf-8")
+            t = rx.sub(lambda m: masks[m.group(1)], t) if rx else t
+            f.write_bytes(mask_names(t, names).encode("utf-8"))
     return errs
 
 
@@ -321,6 +409,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--src", required=True, help="비공개 실행 저장소 폴더 (읽기만 함)")
     ap.add_argument("--rev", default="HEAD", help="복사할 커밋 (기본 HEAD)")
+    ap.add_argument("--held", action="append", required=True,
+                    help="실제 장부·보유·주문 기록 폴더 (logs/exec 또는 그 백업 사본, 여러 번 가능, 읽기만 함). 이 종목 코드는 가림")
     ap.add_argument("--check-only", action="store_true", help="복사하지 않고 이 저장소만 검사")
     a = ap.parse_args()
     sys.stdout.reconfigure(encoding="utf-8")
@@ -328,12 +418,20 @@ def main() -> int:
     if src == DST:
         print("src 와 이 저장소가 같음", file=sys.stderr)
         return 2
+    held = held_codes(a.held)
+    if not held:
+        print("--held 폴더에서 종목 코드를 못 읽음 (장부·보유·주문 기록 폴더인지 확인)", file=sys.stderr)
+        return 2
+    rev = resolve_rev(src, a.rev)
+    names, errs = local_names(src, rev)
+    if errs:
+        print("이름 찾기 실패:", *errs, sep="\n  ")
+        return 1
     user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
-    ctx = {"secrets": env_values(src), "words": [user] if len(user) >= 3 else [],
+    ctx = {"secrets": env_values(src), "words": [w for w in [user, *names.values()] if len(w) >= 3],
            "src_strs": {str(src).lower(), str(src).replace("\\", "/").lower()}}
 
     if not a.check_only:
-        rev = resolve_rev(src, a.rev)
         bad = [p for p in ALLOW if denied(p, DENY_DIRS, DENY_NAMES)]
         if bad:
             print("허용 목록에 금지 경로가 있음:", *bad, sep="\n  ")
@@ -347,11 +445,11 @@ def main() -> int:
                 if p.endswith((".bat", ".ps1")):  # cmd·PowerShell 용은 CRLF (.gitattributes 와 같게)
                     data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
                 out.write_bytes(data)
-            errs = apply_rewrites(stage, src)
+            errs = apply_rewrites(stage, src, held, names)
             if errs:
                 print("바꾸기 실패:", *errs, sep="\n  ")
                 return 1
-            hits = scan_files(stage, ALLOW, ctx)
+            hits = scan_files(stage, ALLOW, ctx, light={p for p in ALLOW if p.startswith(LIGHT_PREFIXES)})
             if hits:
                 report("검사 실패 (저장소에 쓰지 않음)", hits)
                 return 1
@@ -369,7 +467,10 @@ def main() -> int:
 
     files = repo_files(DST)
     hits = [(f, "denied-path") for f in files if denied(f, REPO_DENY_DIRS, REPO_DENY_NAMES)]
-    hits += scan_files(DST, files, ctx, light={f for f in files if f.startswith("backtest_swing/results/")})
+    hits += scan_files(DST, files, ctx, light={f for f in files if f.startswith(LIGHT_PREFIXES)})
+    # 보유·주문 종목 코드: 실행 쪽 파일과 설명 문서만 (백테스트 코드·결과는 실행 전부터 공개한 것이라 우연히 겹칠 수 있음)
+    held_scope = ("backtest_swing/live/", "kiwoom/", "backtest_swing/EXEC_SPEC.md", "README.md", "docs/")
+    hits += held_hits(DST, [f for f in files if f.startswith(held_scope) and is_text(f)], held)
     if hits:
         report("저장소 검사 실패", hits)
         return 1
