@@ -1,5 +1,5 @@
 """
-Codex 확인(27b70e7..577bcb3) 반영 (11J 보완 3 N1 ~ N3, 2026-10-27) 재현 시험.
+Codex 확인(<커밋>..<커밋>) 반영 (11J 보완 3 N1 ~ N3, 2026-10-27) 재현 시험.
 가짜 서버·가짜 시계·가짜 토큰 서버, 실제 주문·조회·토큰 발급·logs/exec 없음.
 
   python -m unittest backtest_swing/live/test_broad5.py -v

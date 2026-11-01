@@ -47,7 +47,7 @@ class Base(unittest.TestCase):
         self.R = R
         self.tmp = tempfile.mkdtemp()
         self.saved = (dict(R.CFG), R.POSITIONS, R.BLOCK, R.APPROVED, R.LEDGER, R.LOG_DIR, R.SNAP_DIR, R.alert, R.Caller,
-                      P.raw_atr20, Q.snapshot, Q.bars_today, Q.close_values, Q.index_now)
+                      P.raw_atr20, Q.snapshot, Q.bars_today, Q.close_values, Q.index_bar)
         R.CFG["state_dir"] = self.tmp
         R.CFG["heartbeat_file"] = os.path.join(self.tmp, "hb.log")
         R.POSITIONS, R.BLOCK = os.path.join(self.tmp, "positions.json"), os.path.join(self.tmp, "block.json")
@@ -77,7 +77,7 @@ class Base(unittest.TestCase):
         RD.SUMMARY = self._saved_summary
         R = self.R
         (cfg, R.POSITIONS, R.BLOCK, R.APPROVED, R.LEDGER, R.LOG_DIR, R.SNAP_DIR, R.alert, R.Caller,
-         P.raw_atr20, Q.snapshot, Q.bars_today, Q.close_values, Q.index_now) = self.saved
+         P.raw_atr20, Q.snapshot, Q.bars_today, Q.close_values, Q.index_bar) = self.saved
         R.CFG.clear()
         R.CFG.update(cfg)
         R.ALERTS, R.ALERTS_PENDING = self._saved_alert_paths
@@ -291,7 +291,9 @@ class Codex(Base):
         try:
             daily.Store, P.raw_daily = NoStore, (lambda code: raw)
             res = self.R.Resident()
-            j = res.judge(["999999"], "2026-10-26", cvs={"999999": {"open": 12000, "high": 12300, "low": 11900, "close": 12100}})["999999"]
+            cv = {"999999": {"open": 12000, "high": 12300, "low": 11900, "close": 12100}}
+            j = res.judge(["999999"], "2026-10-26", cvs=cv, bases={"999999": float(close[-2])})["999999"]   # 11U: 그날 기준가 = 전날 종가 (이벤트 없음)
+            self.assertNotIn("999999", res.judge(["999999"], "2026-10-26", cvs=cv))                          # 11U: 기준가 모름 -> 보류
         finally:
             daily.Store, P.raw_daily = saved
         self.assertIn("원주가 일봉", j["basis"])
@@ -652,7 +654,7 @@ class Codex(Base):
         snap = pd.DataFrame({"code": codes, "open": [33000.0, 60000.0], "high": [33500.0, 61000.0], "low": [32500.0, 59000.0],
                              "close": [33000.0, 60000.0], "volume": [100.0, 100.0], "amount": [1e6, 1e6], "dt": ["20261026"] * 2})
         Q.snapshot = lambda caller, cs: (pd.DataFrame({"raw": [1, 2]}), snap, {"returned": 2, "codes": 2, "seconds": 1.0})
-        Q.index_now = lambda caller: ({"kospi": 1.0, "kosdaq": 1.0}, None)
+        Q.index_bar = lambda caller, day, hhmm: ({"kospi": 1.0, "kosdaq": 1.0}, None)
         import common
         self._saved_uc = common.sd.universe_codes
         common.sd.universe_codes = lambda: codes
@@ -809,7 +811,7 @@ class ResidentPath(Base):
         res.prep_result = {"error": "RuntimeError('x')"}
         res.apply_prep()
         self.assertTrue(res.prep_ok)
-        self.clk.at("15:18:10")                                         # 15:18 뒤에 끝난 다시 적재 -> 버리고 이전 적재 유지, 매수 막음
+        self.clk.at("15:19:31")                                         # 채택 경계(11T: 15:19:31) 뒤에 끝난 다시 적재 -> 버리고 이전 적재 유지, 매수 막음
         res.prep_ok, old = False, res.pool
         res.prep_result = self.prep_out()
         res.apply_prep()

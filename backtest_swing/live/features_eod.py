@@ -4,11 +4,11 @@
   python backtest_swing/live/features_eod.py YYYY-MM-DD [--out-dir DIR]   # 그날 하루
   python backtest_swing/live/features_eod.py --pending                    # 최근 14일 중 아직 안 한 날 (새 날부터, 한 번에 최대 3일)
 
-- 그날 로그(logs/exec/{날짜}.json)의 15:18:30 스냅샷·지수 값·장부 상태(ledger_before)로, 그날 쓴 데이터 버전(로그의 data_version 과 update.json 이 같은
+- 그날 로그(logs/exec/{날짜}.json)의 주문 계획 스냅샷(11T 부터 15:20:01)·지수 값·장부 상태(ledger_before)로, 그날 쓴 데이터 버전(로그의 data_version 과 update.json 이 같은
   data/live_append/versions/{버전})에서 장후 대조(run_day.py rerun)와 같은 계산(동결 load_stock·market_features 그대로 = ShardPool frozen,
   E.run_day frozen_market) -> 대상 종목의 특징값·점수·순위(1 = 점수 최고)·두 장부 상위 3 표시를 logs/exec/features/{날짜}.parquet.
 - 상주 프로그램이 낸 scores/{날짜}.parquet 와 점수 대조 (종목이 같고 최대 절대 차 0 이면 통과) -> logs/exec/features/{날짜}.json, features_eod.log.
-  다르면 텔레그램 알림. 그날 버전 폴더가 남아 있지 않으면(로컬은 최근 3개만, 11S 부터 그날 15:18 버전은 고정) 계산하지 않고 version_missing 기록 + 알림.
+  다르면 텔레그램 알림. 그날 버전 폴더가 남아 있지 않으면(로컬은 최근 3개만, 11S 부터 그날 스냅샷 버전은 고정) 계산하지 않고 version_missing 기록 + 알림.
 - 데이터 버전은 이 프로세스와 계산 작업 프로세스 모두 common.data_dir 를 그 버전 폴더로 고정한다 (실행 중 CURRENT.json 이 바뀌어도 그대로).
   상주 코드·동결 코드는 고치지 않는다. 동결 load_stock 의 임시 파일은 이 실행의 임시 폴더에 쓰고 끝나면 지운다.
 - 장중(거래일 07:00 ~ 하루 끝)에는 실행하지 않는다 (상주 프로그램과 CPU 를 나누지 않게). 1분봉은 저장하지 않는다.
@@ -22,6 +22,8 @@ import shutil
 import sys
 import tempfile
 import time
+
+os.environ["OPENBLAS_NUM_THREADS"] = "1"  # 11V: 단독 실행 진입점도 numpy 를 불러오기 전에 강제 (상주와 같은 값, engine.py 참고)
 
 import numpy as np
 import pandas as pd
@@ -164,7 +166,7 @@ def run_one(day, log_dir=LOG_DIR, out_dir=None, append_dir=APPEND_DIR, compute_f
         log = None
     sf = ((log or {}).get("live") or {}).get("snapshot", {}).get("file")
     if not log or not sf or not os.path.exists(sf) or "index_values" not in log["live"] or "ledger_before" not in log:
-        return _record({**rec, "status": "no_snapshot", "reason": f"그날 로그·15:18:30 스냅샷 없음 ({lp})"}, log_dir, out_dir)
+        return _record({**rec, "status": "no_snapshot", "reason": f"그날 로그·주문 계획 스냅샷 없음 ({lp})"}, log_dir, out_dir)
     dv = log.get("data_version") or (log.get("data") or {}).get("data_version")
     rec["data_version"] = dv
     vdir = find_version(dv, append_dir, name=log.get("data_dir_version"))

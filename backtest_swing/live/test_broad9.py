@@ -1,5 +1,5 @@
 """
-Codex 확인(aba7392..5f192a3) 반영 (11K 보완 3: 분할 자동 조정 제거, LIVE_CONFIG 시작 거부, 일봉 누락 = 공식 거래 종목 기준) 재현 시험.
+Codex 확인(<커밋>..<커밋>) 반영 (11K 보완 3: 분할 자동 조정 제거, LIVE_CONFIG 시작 거부, 일봉 누락 = 공식 거래 종목 기준) 재현 시험.
 가짜 서버·가짜 시계, 실제 주문·조회·logs/exec·data 없음.
 
   python -m unittest backtest_swing/live/test_broad9.py -v

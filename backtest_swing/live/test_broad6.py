@@ -126,15 +126,17 @@ class SpecialHours(Base6):
         h = R.apply_hours(pd.Timestamp("2026-11-19"))
         self.assertEqual((h["open"], h["close"], h["special"], h["confirmed"]), ("10:00:00", "16:30:00", True, False))
         want = {"trend_sell_from": "09:30:00", "trend_sell_until": "09:59:00", "stop_from": "10:00:00", "stop_until": "16:20:00",
-                "stop_send_until": "16:29:00", "data_check": "16:17:00", "snapshot": "16:18:30", "buy_from": "16:21:00", "buy_until": "16:25:00",
+                "stop_send_until": "16:29:00", "data_check": "16:18:31", "snapshot": "16:20:01", "buy_from": "16:21:00", "buy_until": "16:25:00",
                 "no_new_order_after": "16:28:00", "close_check": "16:35:00", "settle": "16:40:00", "close_calc": "16:32:00",
-                "close_calc_until": "17:20:00", "day_end": "17:30:00", "official_retry_until": "16:00:00", "day_start": "07:00:00"}
+                "close_calc_until": "17:20:00", "day_end": "17:30:00", "official_retry_until": "16:01:31", "day_start": "07:00:00",
+                "plan_snapshot": "16:20:01", "no_reload_after": "16:19:31", "refetch_start_until": "16:11:31", "refetch_publish_by": "16:14:31",
+                "monthly_deadline": "16:01:31"}                                      # 11T: 스냅샷에 묶인 시각도 함께 밀림
         self.assertEqual({k: R.T[k] for k in want}, want)
         self.assertEqual((R.at("08:20:00"), R.at("15:10:00")), ("09:20:00", "16:10:00"))
         R.apply_hours(pd.Timestamp("2026-11-20"))
         self.assertEqual(R.T, R.BASE_T)
         R.apply_hours(pd.Timestamp("2027-01-04"))                                   # 새해 첫 거래일: 개장만 1시간 늦음
-        self.assertEqual((R.T["trend_sell_from"], R.T["stop_from"], R.T["stop_until"], R.T["snapshot"]), ("09:30:00", "10:00:00", "15:20:00", "15:18:30"))
+        self.assertEqual((R.T["trend_sell_from"], R.T["stop_from"], R.T["stop_until"], R.T["snapshot"]), ("09:30:00", "10:00:00", "15:20:00", "15:20:01"))
 
     def test_resident_day_uses_shifted_windows(self):
         self.clk.t = pd.Timestamp("2026-11-19 09:58:00")
@@ -230,10 +232,14 @@ class OfficialRejudge(Base6):
         krx_official.fetch_day = lambda d: calls.append(d) or pd.DataFrame()
         self.addCleanup(setattr, krx_official, "fetch_day", saved)
         res.retry_official()
+        res.redo_thread.join(5)                                                     # 11V: 확인은 별도 스레드
         self.assertEqual(len(calls), 1)                                             # 2분 지나면 다시 (예전 10분)
+        res.retry_official()                                                        # 결과 반영
+        self.assertEqual(res.day.s["official_retries"][-1]["available"], False)
         res.day.s["steps"]["data"]["attempt"] = "09:03:00"
         self.clk.at("09:05:30")
         res.retry_official()
+        self.assertIsNone(res.redo_thread)
         self.assertEqual(len(calls), 1)                                             # 08:30 뒤는 10분 그대로
 
 

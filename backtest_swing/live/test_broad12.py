@@ -1,5 +1,5 @@
 """
-6efb549 Codex 확인 리뷰 반영 (11L 보완 2, 2026-10-28) 재현 시험: 공용 제한기 동시 대기 직렬화, 매수 전송 마감 하나(15:28 전).
+<커밋> Codex 확인 리뷰 반영 (11L 보완 2, 2026-10-28) 재현 시험: 공용 제한기 동시 대기 직렬화, 매수 전송 마감 하나(15:28 전).
 실제 키움 클라이언트 경로·실제 스레드(동시 대기) / 가짜 서버·가짜 시계(마감 경계). 실제 주문·조회·logs/exec·data 없음.
 
   python -m unittest backtest_swing/live/test_broad12.py -v
@@ -62,7 +62,7 @@ class ConcurrentGate(unittest.TestCase):
         s = sorted(sent)
         gaps = [round(y - x, 3) for x, y in zip(s, s[1:])]
         self.assertEqual(len(s), 10)
-        self.assertGreaterEqual(min(gaps), 0.245, gaps)                             # 6efb549: 0.05 안팎이 나옴
+        self.assertGreaterEqual(min(gaps), 0.245, gaps)                             # <커밋>: 0.05 안팎이 나옴
 
 
 class Deadline1528(Base):
@@ -109,7 +109,7 @@ class Deadline1528(Base):
         self.assertFalse([i for i in res.om.records if i["status"] == O.ACCEPTED])
 
     def test_first_buy_at_1526_is_sent(self):
-        """늦게 시작한 매수 단계도 15:28 전이면 보냄 (6efb549: 15:25 뒤 첫 전송 안 함)"""
+        """늦게 시작한 매수 단계도 15:28 전이면 보냄 (<커밋>: 15:25 뒤 첫 전송 안 함)"""
         res = self.started("15:26:00")
         res.tick(self.clk())
         self.assertEqual(len(sends(self.fk)), 1)

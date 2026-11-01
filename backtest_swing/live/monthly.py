@@ -25,6 +25,8 @@ import sys
 import time
 import traceback
 
+os.environ["OPENBLAS_NUM_THREADS"] = "1"  # 11V: 단독 실행 진입점도 numpy 를 불러오기 전에 강제 (상주와 같은 값, engine.py 참고)
+
 import numpy as np
 import pandas as pd
 

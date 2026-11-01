@@ -1,5 +1,5 @@
 """
-11S 보완 시험 (443a1ae Codex 확인 [P1] 2건): 1 장중 재수집 다시 적재는 이중 적재 (기존 적재를 계속 쓰고, 완료 시각이 15:18:00 전이고 스냅샷 전이면
+11S 보완 시험 (<커밋> Codex 확인 [P1] 2건): 1 장중 재수집 다시 적재는 이중 적재 (기존 적재를 계속 쓰고, 완료 시각이 15:18:00 전이고 스냅샷 전이면
 한 번에 바꿔 끼움, 아니면 새 묶음을 닫고 버림, 바꿔 끼우는 동안 손절 감시 계속), 2 채택한 데이터 버전은 '사용 중'으로 정리에서 안 지움·15:18 고정은
 그 이름 그대로·그날 버전이 없으면 동결 대조는 '대조 미완료'(불일치 차단 아님).
 가짜 키움 일봉 서버·가짜 주문 서버·가짜 시계, 실제 키움 호출·data·logs 없음.
@@ -78,7 +78,7 @@ class Swap(Base):
         res.prep_reason, res.prep_thread, res.prep_result = self.preps[-1], object(), None
 
     def snapshot(self, res, hms):
-        """15:18:30 스냅샷 단계 (run_step): 점수 계산에 쓴 묶음을 돌려줌"""
+        """주문 계획 스냅샷 단계 (run_step, 11T: 15:20:01): 점수 계산에 쓴 묶음을 돌려줌"""
         self.clk.at(hms)
         codes = list(AMT)
         snap = pd.DataFrame({"code": codes, "open": 3500.0, "high": 3600.0, "low": 3400.0, "close": 3500.0, "volume": 1e5, "amount": 3.5e8,
@@ -88,27 +88,27 @@ class Swap(Base):
         out = {"filter": {"filter_ok": True, "prev_kospi_close": 2700.0, "prev_kospi_ma120": 2500.0}, "eligible": t3[["code", "score"]],
                "market": {}, "errors": [], "ledgers": {n: {"top3": t3, "busy": [], "skipped_busy": [], "ledger_status": []} for n in ("strategy", "full")}}
         used = []
-        saved = (Q.snapshot, Q.index_now, C.sd.universe_codes, E.run_day)
+        saved = (Q.snapshot, Q.index_bar, C.sd.universe_codes, E.run_day)
         try:
             Q.snapshot = lambda caller, cs, **k: (raw, snap, {"returned": len(codes), "codes": len(codes), "seconds": 1.0})
-            Q.index_now = lambda caller: ({"kospi": 1.0, "kosdaq": 1.0}, None)
+            Q.index_bar = lambda caller, day, hhmm: ({"kospi": 1.0, "kosdaq": 1.0}, None)
             C.sd.universe_codes = lambda: list(codes)
             E.run_day = lambda pool, *a, **k: used.append(pool) or out
             S.run_step(res.day, "snapshot", res.snapshot_and_plan)
         finally:
-            Q.snapshot, Q.index_now, C.sd.universe_codes, E.run_day = saved
+            Q.snapshot, Q.index_bar, C.sd.universe_codes, E.run_day = saved
         return used
 
     # ------------------------------------------------------------ 1 이중 적재
 
-    def test_reload_from_1512_keeps_old_for_1518_snapshot(self):
-        """15:12 시작한 재적재가 15:22 에 끝남: 15:18:30 스냅샷은 기존 적재로 성공, 끝난 새 묶음은 닫고 버림 (차단 없음)"""
+    def test_reload_from_1512_keeps_old_for_1520_snapshot(self):
+        """15:12 시작한 재적재가 15:22 에 끝남: 15:20:01 스냅샷은 기존 적재로 성공, 끝난 새 묶음은 닫고 버림 (차단 없음)"""
         res = self.morning("07:30:00")
         old, new = Pool("old"), Pool("new")
         self.adopt(res, old)
         self.refetched(res, "15:12:00")
         self.assertTrue(res.prep_ok)                                                            # 재적재 중에도 기존 적재 사용 가능
-        self.assertEqual(self.snapshot(res, "15:18:30"), [old])
+        self.assertEqual(self.snapshot(res, "15:20:01"), [old])
         self.assertTrue(res.day.done("snapshot"))
         self.clk.at("15:22:00")
         self.adopt(res, new, self.preps[-1], finished="15:22:00")
@@ -121,25 +121,26 @@ class Swap(Base):
         self.assertEqual(res.day.s["reload_swap"][-1]["adopted"], False)
 
     def test_adopt_by_finish_time(self):
-        """15:17:59 에 끝나 15:18:01 에 반영 -> 채택 (스냅샷 전). 15:18:01 에 끝남 -> 버림. 스냅샷이 이미 시작했으면 15:18 전에 끝났어도 버림"""
+        """11T 채택 경계 = 스냅샷 15:20:01 - 30초 = 15:19:31. 15:19:30 에 끝나 15:19:32 에 반영 -> 채택 (스냅샷 전). 15:19:31 에 끝남 -> 버림.
+        스냅샷이 이미 시작했으면 경계 전에 끝났어도 버림"""
         res = self.morning("07:30:00")
         old, new = Pool("old"), Pool("new")
         self.adopt(res, old)
         self.refetched(res, "15:05:00")
-        self.clk.at("15:18:01")
-        self.adopt(res, new, self.preps[-1], finished="15:17:59")
+        self.clk.at("15:19:32")
+        self.adopt(res, new, self.preps[-1], finished="15:19:30")
         self.settle_dispose(res)
         self.assertIs(res.pool, new)
         self.assertTrue(old.closed)
-        self.assertEqual(self.snapshot(res, "15:18:30"), [new])                                 # 바꿔 끼운 적재로 스냅샷
+        self.assertEqual(self.snapshot(res, "15:20:01"), [new])                                 # 바꿔 끼운 적재로 스냅샷
 
         res2 = self.morning("07:30:00")
         self.preps.clear()
         old2, late = Pool("old2"), Pool("late")
         self.adopt(res2, old2)
         self.refetched(res2, "15:05:00")
-        self.clk.at("15:18:02")
-        self.adopt(res2, late, self.preps[-1], finished="15:18:01")
+        self.clk.at("15:19:32")
+        self.adopt(res2, late, self.preps[-1], finished="15:19:31")
         self.settle_dispose(res2)
         self.assertIs(res2.pool, old2)
         self.assertTrue(late.closed)
@@ -150,8 +151,8 @@ class Swap(Base):
         old, new = Pool("old"), Pool("new")
         self.adopt(res, old)
         self.refetched(res, "15:05:00")
-        self.assertEqual(self.snapshot(res, "15:18:30"), [old])
-        self.adopt(res, new, self.preps[-1], finished="15:17:59")                               # (가정) 늦게 반영돼도 스냅샷 뒤면 안 바꿈
+        self.assertEqual(self.snapshot(res, "15:20:01"), [old])
+        self.adopt(res, new, self.preps[-1], finished="15:19:30")                               # (가정) 늦게 반영돼도 스냅샷 뒤면 안 바꿈
         self.settle_dispose(res)
         self.assertIs(res.pool, old)
         self.assertTrue(new.closed)
@@ -184,7 +185,7 @@ class Swap(Base):
     # ------------------------------------------------------------ 2 사용 중 버전
 
     def test_in_use_version_survives_refetch_publishes(self):
-        """재적재 실패로 아침 적재 유지 중 재수집 버전 3번 공개 -> 아침 버전 남음, 15:18 고정 = 아침 버전, 다음 채택이 해제"""
+        """재적재 실패로 아침 적재 유지 중 재수집 버전 3번 공개 -> 아침 버전 남음, 스냅샷 고정 = 아침 버전, 다음 채택이 해제"""
         res = self.morning("07:30:00")
         v0 = os.path.basename(C.data_dir(self.ad))
         self.adopt(res, Pool("morning"))
@@ -195,7 +196,7 @@ class Swap(Base):
         self.assertIn(v0, have)
         self.assertEqual(len(have), 4)                                                          # 최근 3개 + 사용 중
         self.assertNotEqual(C.data_dir(self.ad), os.path.join(self.ad, "versions", v0))
-        self.snapshot(res, "15:18:30")
+        self.snapshot(res, "15:20:01")
         self.assertTrue(res.day.done("snapshot"))
         self.assertEqual(C.pinned_versions(self.ad)["2026-10-26"], v0)                          # 사용 중인 버전 이름 그대로
         self.assertEqual(jl(os.path.join(self.R.LOG_DIR, "2026-10-26.json"))["data_dir_version"], v0)

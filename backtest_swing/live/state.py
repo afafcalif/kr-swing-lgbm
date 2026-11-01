@@ -56,7 +56,7 @@ def prev_trading_day(day, hol=None):
 
 SPECIAL_HOURS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "krx_special_hours.json")
 BASE_OPEN, BASE_CLOSE = "09:00:00", "15:30:00"
-NO_SHIFT = {"day_start", "measure_until"}  # 07:00 하루 시작, 날짜 값
+NO_SHIFT = {"day_start"}  # 07:00 하루 시작
 
 
 def special_hours(path=SPECIAL_HOURS_FILE):

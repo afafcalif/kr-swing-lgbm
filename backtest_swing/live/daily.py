@@ -425,7 +425,7 @@ class Collect:
 
 
 def update(only=None, check=None):
-    """아침 일봉 갱신. check = {"day": 전날, "base_events": {code: k}} (11S D: 전날 15:18 그날 계수, 상주 프로그램이 넘김)"""
+    """아침 일봉 갱신. check = {"day": 전날, "base_events": {code: k}} (11S D: 전날 주문 계획 스냅샷의 그날 계수, 상주 프로그램이 넘김)"""
     from kiwoom import krx_official
     os.makedirs(APPEND_DIR, exist_ok=True)
     t0 = time.time()
@@ -467,7 +467,7 @@ def update(only=None, check=None):
         cp = os.path.join(krx_official.CACHE_DIR, f"{pd.Timestamp(d_):%Y%m%d}.parquet")
         received[str(pd.Timestamp(d_).date())] = pd.Timestamp(os.path.getmtime(cp), unit="s", tz="UTC").tz_convert("Asia/Seoul").strftime("%Y-%m-%d %H:%M:%S") \
             if os.path.exists(cp) else None
-    # 11S D: 전날 15:18 에 쓴 고정 버전 (없으면 갱신 전 지금 버전) = 다음 날 대조 대상
+    # 11S D: 전날 주문 계획 스냅샷에 쓴 고정 버전 (없으면 갱신 전 지금 버전) = 다음 날 대조 대상
     prev_dir = version_dir(pinned_versions(APPEND_DIR).get(latest_trading_day), append_dir=APPEND_DIR) or _cur_dir()
     prev_u = _update_json(prev_dir)
     targets = next_day_targets(prev_u, check, latest_trading_day)
@@ -567,7 +567,7 @@ PUBLISH_LOCK = threading.Lock()  # 같은 프로세스 안에서 버전 공개�
 def refetch(codes, stop_at=None):
     """11S C2: 07:00 에 실패한 종목(fetch_error·missing_row)만 키움 일봉을 다시 받아, 받은 종목은 아침 갱신과 같은 종목별 처리(Collect: 11R 계수 대조·
     다시 맞춤 -> 행 누락 확인 -> 공식 값 덮어쓰기)를 거쳐 지금 버전에서 그 종목 행·표시를 바꾼 새 버전을 공개한다 (다시 적재는 상주 프로그램이).
-    공식 시세를 기다리는 날이 있으면 안 함 (재반영 뒤에). stop_at() 이 참이면 더 받지 않고 공개도 안 함 (다시 적재가 15:18 전에 끝나게).
+    공식 시세를 기다리는 날이 있으면 안 함 (재반영 뒤에). stop_at() 이 참이면 더 받지 않고 공개도 안 함 (다시 적재가 채택 경계 no_reload_after 전에 끝나게).
     호출 제한기는 같은 프로세스의 공용 제한기, 연속 유량 실패는 이 재수집 Caller 가 따로 셈. 반환 dict (published = 새 버전 이름 또는 None)"""
     from kiwoom import krx_official
     t0 = time.time()
@@ -603,7 +603,7 @@ def refetch(codes, stop_at=None):
     if not done:
         return {**out, "reason": "받은 종목 없음"}
     if stop_at is not None and stop_at():
-        return {**out, "reason": "공개 시각 지남 -> 공개 안 함 (다시 적재가 15:18 전에 끝나지 못함)"}
+        return {**out, "reason": "공개 시각 지남 -> 공개 안 함 (다시 적재가 채택 경계 전에 끝나지 못함)"}
     with PUBLISH_LOCK:
         dd = _cur_dir()
         u = _update_json(dd)
@@ -641,7 +641,7 @@ def refetch(codes, stop_at=None):
 # ---------------------------------------------------------------- 11S D: 다음 날 대조
 
 def next_day_targets(prev_u, check, day):
-    """다음 날 대조 대상: 전날 버전의 공식 값 채움 {code: 날짜들}·다시 맞춤 {code: k}, 전날 15:18 그날 계수 {code: k} (check 의 day 가 맞을 때만)"""
+    """다음 날 대조 대상: 전날 버전의 공식 값 채움 {code: 날짜들}·다시 맞춤 {code: k}, 전날 주문 계획 스냅샷의 그날 계수 {code: k} (check 의 day 가 맞을 때만)"""
     ev = ((check or {}).get("base_events") or {}) if str((check or {}).get("day")) == str(day) else {}
     return {"filled": {c: list(v.get("dates") or []) for c, v in (prev_u.get("official_filled") or {}).items()},
             "rebased": rebased_k(prev_u), "base_events": {c: float(k) for c, k in ev.items()}}
@@ -657,7 +657,7 @@ def next_day_check(prev_dir, fetched, targets, day):
     - 공식 값 채움: 채운 날의 원주가 시가·고가·저가·종가·거래량·거래대금 (키움 행은 공식 정규장 값 덮어쓴 뒤) 같음, 수정주가 시가·고가·저가·종가는
       일정한 비율 K (시가 비율 중앙값, 오늘 새 이벤트면 K ≠ 1) 로 1원 또는 0.2% 안
     - 다시 맞춤: 기본 파일 마지막 5일 시가 x k (원 반올림) x K = 키움 수정주가 시가 (1원 또는 0.2% 안)
-    - 그날 계수: 키움 factor(그 앞 거래일) / factor(그날) = k (0.2% 안). k = 15:18 기준가 / 전날 종가
+    - 그날 계수: 키움 factor(그 앞 거래일) / factor(그날) = k (0.2% 안). k = 주문 계획 스냅샷 기준가 / 전날 종가
     반환 {version, day, checked {종류: 수}, mismatch [{code, kind, ...}], not_fetched {종류: [code]}}"""
     out = {"version": os.path.basename(prev_dir), "day": str(day), "checked": {}, "mismatch": [], "not_fetched": {}}
     pa = pr = None

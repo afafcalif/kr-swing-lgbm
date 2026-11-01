@@ -100,7 +100,7 @@ def data_file(name, append_dir=None):
     return os.path.join(data_dir(append_dir), name)
 
 
-PINS = "PINNED.json"  # 11S: 그날 15:18 스냅샷에 쓴 데이터 버전 {날짜: 버전 이름} (지난 버전 정리에서 지우지 않음)
+PINS = "PINNED.json"  # 11S: 그날 주문 계획 스냅샷에 쓴 데이터 버전 {날짜: 버전 이름} (지난 버전 정리에서 지우지 않음)
 PIN_KEEP = 10         # 최근 이만큼의 날짜만 고정 유지
 
 

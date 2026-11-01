@@ -1,5 +1,5 @@
 """
-Codex 확인(8cb95f6..d8cb441) 반영 (11K 보완 1 ~ 5, 2026-10-27) 재현 시험. 가짜 서버·가짜 시계·가짜 학습 프로세스, 실제 주문·조회·학습·logs/exec·data 없음.
+Codex 확인(<커밋>..<커밋>) 반영 (11K 보완 1 ~ 5, 2026-10-27) 재현 시험. 가짜 서버·가짜 시계·가짜 학습 프로세스, 실제 주문·조회·학습·logs/exec·data 없음.
 
   python -m unittest backtest_swing/live/test_broad7.py -v
 """
@@ -155,7 +155,10 @@ class MonthlyCatchup(Catch):
         self.clk.t = pd.Timestamp("2026-11-02 07:00:00")
         res = self.arm(self.started("07:00:00"))
         res.tick(self.clk())
-        self.clk.at("15:00:05")
+        self.clk.at("15:01:30")                                                      # 11T: 마감 = 스냅샷 15:20:01 - 1110초 = 15:01:31
+        res.tick(self.clk())
+        self.assertEqual(self.killed, [])
+        self.clk.at("15:01:31")
         res.tick(self.clk())
         self.assertEqual(self.killed, [self.procs[0].pid])
         self.assertIn("monthly_model_missing", res.day.s["buy_block"])
@@ -215,7 +218,7 @@ class FilterInput(Base6):
         snap = pd.DataFrame({"code": codes, "open": [33000.0], "high": [33500.0], "low": [32800.0], "close": [33100.0], "volume": [1e5],
                              "amount": [3.3e9], "dt": ["20261026"], "cntr_tm": ["151830"]})
         Q.snapshot = lambda caller, cs, **k: (raw, snap, {"returned": 1, "codes": 1, "requests": 1, "seconds": 0.1, "missing": []})
-        Q.index_now = lambda caller: ({"kospi": 2700.0, "kosdaq": 850.0}, {})
+        Q.index_bar = lambda caller, day, hhmm: ({"kospi": 2700.0, "kosdaq": 850.0}, {})
         top = pd.DataFrame({"code": codes, "score": [0.5], "raw_close": [33100.0]})
         fake = {"filter": {"filter_ok": True, "prev_kospi_close": float("nan"), "prev_kospi_ma120": float("nan")},  # NaN 인데 통과로 온 경우
                 "eligible": pd.DataFrame({"code": codes, "score": [0.5]}), "market": {}, "errors": [],

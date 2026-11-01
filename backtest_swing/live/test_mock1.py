@@ -281,12 +281,13 @@ class Lifecycle(AfterCloseBase):
         self.assertEqual(calls[3:], ["kill", ("join", 1.0)])
         self.assertEqual(r, {"killed": 1, "alive": 0})
 
-    def test_last_measure_past_1630_finishes_after_close(self):
+    def test_last_step_past_1630_finishes_after_close(self):
         closed = []
         res = self.day_with_snapshot("15:31:00")
         res.pool = type("FakePool", (), {"shutdown": lambda self: closed.append(1)})()
         gate = threading.Event()
-        res.compare_measure = lambda bars, targets, d=None: (gate.wait(10), {"n": 0})[1]   # 마지막 측정이 끝나지 않음
+        rr = res.wait_rerun
+        res.wait_rerun = lambda started, out, should_stop=None: (gate.wait(10), rr(started, out))[1]   # 마지막 단계(동결 코드 대조 기다림)가 끝나지 않음 (11T: 15:20 측정 뺌)
         self.clk.at("15:32:00")
         res.tick(self.clk())
         job = res.close_job
@@ -309,9 +310,9 @@ class Lifecycle(AfterCloseBase):
         self.assertTrue(any("[대조 미완료]" in a for a in self.alerts))
         self.assertTrue(wait_for(lambda: closed == [1]))                          # 묶음은 별도 스레드에서 정리
         self.assertIsNone(res.pool)
-        gate.set()                                                                # 늦게 끝난 측정
+        gate.set()                                                                # 늦게 끝난 마지막 단계
         self.assertTrue(wait_for(lambda: not job["thread"].is_alive()))
-        self.assertIn("취소", job["result"]["aborted"])                            # 측정 뒤 확인에서 멈춤
+        self.assertIn("취소", job["result"]["aborted"])                            # 마지막 단계 뒤 확인에서 멈춤
         self.clk.at("16:31:00")
         res.tick(self.clk())
         self.assertEqual((res.close_stale, res.close_job), ([], None))
@@ -319,18 +320,19 @@ class Lifecycle(AfterCloseBase):
         st = jl(os.path.join(self.tmp, "2026-10-26.json"))
         self.assertEqual((st["steps"]["after_close"]["status"], st["steps"]["ac_summary"]["status"]), (S.SUCCEEDED, S.SUCCEEDED))
 
-    def test_deadline_checked_after_last_measure(self):
+    def test_deadline_checked_after_last_step(self):
         res = self.day_with_snapshot("16:15:00")
         clk = self.clk
+        rr = res.wait_rerun
 
-        def measure(bars, targets, d=None):
-            clk.at("16:20:01")                                                    # 마지막 측정 중 상한 넘김
-            return {"n": 0}
-        res.compare_measure = measure
+        def last(started, out, should_stop=None):
+            clk.at("16:20:01")                                                    # 마지막 단계(동결 코드 대조 기다림) 중 상한 넘김
+            return rr(started, out)
+        res.wait_rerun = last
         res.start_close_calc()
         self.assertTrue(wait_for(res.close_ready))
         self.assertIn("상한 16:20 초과", res.close_result["aborted"])
-        self.assertEqual(res.close_result["measure_1520"], {"n": 0})               # 측정 결과는 남김
+        self.assertIn("close_1530", res.close_result)                             # 그때까지 계산한 15:30 상위 3 은 남김
 
     def test_after_1630_no_job_pool_closed(self):
         closed = []
@@ -421,7 +423,7 @@ class Heartbeat(Base):
             W.CFG.update(log_dir=tmp, state_dir=tmp, heartbeat_file=os.path.join(tmp, "hb.log"), pid_file=os.path.join(tmp, "r.pid"))
             W.LOOP_FLAG, W.FLAG, W.LOG = os.path.join(tmp, "loop.flag"), os.path.join(tmp, "hb.flag"), os.path.join(tmp, "w.log")
             W.start = lambda: self.fail("살아 있으면 켜지 않음")
-            W.N.send = lambda msg, **k: sent.append(msg)
+            W.N.send = lambda msg, **k: sent.append(msg) or True                 # 11V: 보낸 것만 완료 표시
             common.resident_running = lambda *a, **k: True
             now = pd.Timestamp.now()
             with open(W.CFG["heartbeat_file"], "w", encoding="utf-8") as f:

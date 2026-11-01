@@ -207,17 +207,17 @@ class Intraday(Base):
         sent = self.snap_buy(res, "000007")
         self.assertEqual([s[2]["stk_cd"] for s in sent], ["000007"])                           # 정상 매수
         vname = os.path.basename(C.data_dir(self.ad))
-        self.assertEqual(C.pinned_versions(self.ad)["2026-10-26"], vname)                      # 15:18 에 쓴 버전 고정
+        self.assertEqual(C.pinned_versions(self.ad)["2026-10-26"], vname)                      # 주문 계획 스냅샷에 쓴 버전 고정
         self.assertEqual(jl(os.path.join(self.R.LOG_DIR, "2026-10-26.json"))["data_dir_version"], vname)
 
     def snap_buy(self, res, top):
-        self.clk.at("15:18:40")
+        self.clk.at("15:20:01")
         codes = [c for c in AMT if c != "000006"]
         snap = pd.DataFrame({"code": codes, "open": 3500.0, "high": 3600.0, "low": 3400.0, "close": 3500.0, "volume": 1e5, "amount": 3.5e8,
                              "dt": "20261026"})
         raw = pd.DataFrame({"stk_cd": codes, "upl_pric": "+4550", "lst_pric": "-2450", "base_pric": "3500"})
         Q.snapshot = lambda caller, cs, **k: (raw, snap, {"returned": len(codes), "codes": len(codes), "seconds": 1.0})
-        Q.index_now = lambda caller: ({"kospi": 1.0, "kosdaq": 1.0}, None)
+        Q.index_bar = lambda caller, day, hhmm: ({"kospi": 1.0, "kosdaq": 1.0}, None)
         saved_uc = C.sd.universe_codes
         C.sd.universe_codes = lambda: list(codes)
         t3 = pd.DataFrame({"code": [top], "score": [0.9], "raw_close": [3500.0]})
@@ -254,25 +254,27 @@ class Intraday(Base):
         res.tick(self.clk())
         self.assertEqual(res.day.s["intraday_refetch"]["10:00:00"]["got"], ["000007"])
 
-    def test_no_start_after_1510_and_no_publish_after_1513(self):
+    def test_no_start_after_1511_31_and_no_publish_after_1514_31(self):
+        """11T: 시작 마감·공개 마감은 스냅샷(15:20:01) 기준 -510초·-330초 = 15:11:31·15:14:31 (예전 15:10·15:13)"""
         res = self.morning("07:30:00")
-        self.clk.at("15:10:00")
+        self.assertEqual((self.R.T["refetch_start_until"], self.R.T["refetch_publish_by"]), ("15:11:31", "15:14:31"))
+        self.clk.at("15:11:31")
         res.refetch_tick(self.clk())
-        self.assertIsNone(res.refetch_thread)                                                  # 15:10 뒤에는 시작 안 함
+        self.assertIsNone(res.refetch_thread)                                                  # 15:11:31 뒤에는 시작 안 함
         self.assertNotIn("intraday_refetch", res.day.s)
         v0 = C.data_dir(self.ad)
-        self.chart.hook = lambda j: self.clk.at("15:13:30") if j["stk_cd"] == "000007" else None   # 000007 을 받는 동안 15:13 지남
-        self.run_slot(res, "15:09:00")
+        self.chart.hook = lambda j: self.clk.at("15:14:31") if j["stk_cd"] == "000007" else None   # 000007 을 받는 동안 15:14:31 지남
+        self.run_slot(res, "15:11:30")                                                         # 예전 마감(15:10) 뒤여도 시작
         r = res.day.s["intraday_refetch"]["15:00:00"]
         self.assertIsNone(r["published"])
         self.assertIn("공개 시각 지남", r["reason"])
         self.assertEqual((C.data_dir(self.ad), self.preps), (v0, []))                           # 새 버전·다시 적재 없음
 
-    def test_late_reload_after_1518_keeps_old_without_block(self):
+    def test_late_reload_after_1519_31_keeps_old_without_block(self):
         res = self.morning("07:30:00")
         res.pool = SimpleNamespace(close=lambda: None)
         res.ctx["prep"] = self.prep_out()["prep"]
-        self.clk.at("15:18:30")
+        self.clk.at("15:19:31")                                                                # 11T: 채택 경계 = 스냅샷 15:20:01 - 30초
         res.prep_reason, res.prep_thread, res.prep_result = "장중 재수집 뒤 다시 적재 (15:00: ['000007'])", object(), self.prep_out()
         old = res.pool
         res.apply_prep()

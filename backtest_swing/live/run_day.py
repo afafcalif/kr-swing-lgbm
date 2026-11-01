@@ -1,7 +1,7 @@
 """
 그림자 모드 하루 실행 (EXEC_SPEC 1-3, 3A 그림자 모드, 3B, 5장, 8장 12). 주문(kt10000·kt10001)·계좌 조회 없음, 시세 조회 TR 만 (실전 토큰).
 
-  python backtest_swing/live/run_day.py shadow     # 장 전 준비 -> 15:18:30 스냅샷 -> 점수·두 장부 상위 3·주문 계획 기록 -> 15:32 이후 15:30 1분봉 기준 상위 3 -> 다시 돌리기 대조
+  python backtest_swing/live/run_day.py shadow     # 장 전 준비 -> 15:20:01 스냅샷 (config times.plan_snapshot) -> 점수·두 장부 상위 3·주문 계획 기록 -> 15:32 이후 15:30 1분봉 기준 상위 3 -> 다시 돌리기 대조
   python backtest_swing/live/run_day.py rerun YYYY-MM-DD   # 저장한 스냅샷 + 실행 엔진과 같은 장부 상태로 동결 함수를 그대로 호출해 다시 계산, 실시간 상위 3 과 비교
 
 결과: logs/exec/{날짜}.json, logs/exec/summary.csv, logs/exec/snapshots/{날짜}.parquet, logs/exec/ledger.json (가상 신호 장부 두 개)
@@ -25,8 +25,9 @@ from common import (APPEND_DIR, CAPITAL, data_file, LOG_DIR, SNAP_DIR, Caller, L
 import engine as E  # noqa: E402
 import model as M  # noqa: E402
 import quotes as Q  # noqa: E402
+import settings  # noqa: E402
 
-SNAP_AT = "15:18:30"
+SNAP_AT = settings.load()["times"]["snapshot"]  # 11T: 상주 프로그램과 같은 주문 계획 스냅샷 시각 (평소 15:20:01)
 CLOSE_AFTER = "15:32:00"
 LEDGER = os.path.join(LOG_DIR, "ledger.json")
 SUMMARY = os.path.join(LOG_DIR, "summary.csv")
@@ -183,12 +184,14 @@ def shadow():
     jdump(path, log)
     print(f"prepared {now():%H:%M:%S}: {json.dumps(info, ensure_ascii=False, default=str)[:600]}", flush=True)
     caller = Caller("prod", 5)
-    wait_until(SNAP_AT)
+    snap_at = S.shift_hms(SNAP_AT, S.day_hours(day))  # 거래시간 변경일은 함께 밂
+    wait_until(snap_at)
     t0 = time.time()
     t_start = now()
     codes = sd.universe_codes()
     raw, snap, srec = Q.snapshot(caller, codes)
-    idx_vals, idx_raw = Q.index_now(caller)
+    # 11T: 지수 = 스냅샷 앞 분의 업종 1분봉 종가 (15:19 봉, 상주 프로그램과 같음)
+    idx_vals, idx_raw = Q.index_bar(caller, day, (pd.Timestamp(f"2000-01-01 {snap_at}") - pd.Timedelta(minutes=1)).strftime("%H%M"))
     t_snap = time.time() - t0
     ok, vinfo = S.validate_snapshot(snap, day)
     if not ok:

@@ -198,8 +198,8 @@ class SameMinute(unittest.TestCase):
         om.b.sell_market = lambda c, q: (log.append(("send", c, q)), real(c, q))[1]
         r = cycle(om, fk, pos, quotes={"990006": 29000.0, "005930": 49000.0},   # 990006 도 손절가 아래
                   on_trigger=lambda new: log.append(("save", sorted(new))))
-        self.assertEqual(log, [("send", "990006", 28), ("save", ["005930"]), ("send", "005930", 10)])
-        self.assertEqual([(i["code"], i["stage"]) for i in om.records], [("990006", "trend_late"), ("005930", "stop")])
+        self.assertEqual(log, [("save", ["005930"]), ("send", "005930", 10), ("send", "990006", 28)])   # 11U: 새 손절 먼저
+        self.assertEqual([(i["code"], i["stage"]) for i in om.records], [("005930", "stop"), ("990006", "trend_late")])
         self.assertEqual(list(r["triggered_new"]), ["005930"])
         self.assertEqual({c: d["kind"] for c, d in pos["sell_duty"].items()}, {"990006": "trend", "005930": "stop"})
         clk.at("10:01:00")
@@ -208,7 +208,7 @@ class SameMinute(unittest.TestCase):
 
 
 class OldFormat(Base):
-    """규칙 8: 예전 형식(515f554 거래 단위·trade_id 없음) 의무·목록은 시작 때 종목 코드 단위로 바꾸고 알림, 계좌에 없으면 버림.
+    """규칙 8: 예전 형식(<커밋> 거래 단위·trade_id 없음) 의무·목록은 시작 때 종목 코드 단위로 바꾸고 알림, 계좌에 없으면 버림.
     이전 거래의 목록 항목(trade_id 다름 = 같은 날 다시 산 새 거래)은 버려 새 거래를 팔지 않음"""
 
     def test_old_format_converted_and_rebuy_not_sold(self):

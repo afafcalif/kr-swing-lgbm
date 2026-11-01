@@ -46,6 +46,9 @@ CHECK_DELAYS = (5, 30, 120)  # 응답 없음 다시 조회 (초)
 MAX_ATTEMPTS = {"buy": 2, "trend_sell": 2, "stop": None, "trend_late": None}  # None = 상한 없음 (거부가 계속되면 간격만 늘림, 11J)
 RETRY_FREE = 5        # 상한 없는 단계: 거부 5회까지는 매 분, 그 뒤 2·4·8분 ... 최대 10분 간격 (장 끝까지)
 RETRY_MAX_GAP = 10
+CANCEL_MAX = 2            # 15:35 취소: 서버가 거부·불명(REJECTED·UNKNOWN)으로 답한 시도는 이만큼까지 (11V: NOT_SENT 는 안 셈)
+CANCEL_GAP_SEC = 30       # 11V: 보내지 않음(NOT_SENT: 유량·인증 등)이면 이 간격(초) 뒤 정산을 다시 돌릴 때 다시
+CANCEL_NOT_SENT_MAX = 10  # 11V: NOT_SENT 만 계속될 때의 안전 상한 (정산 다시 돌리기 횟수 안)
 RATE_RETRIES = 3      # 11L: 유량 초과면 한 번의 보내기 안에서 간격(order_interval, 최소 1초)을 두고 다시 보내는 횟수 (거부 횟수와 따로)
 
 
@@ -451,20 +454,34 @@ def duty_inputs(positions, codes, acct):
 
 
 def stop_cycle(om, watch, positions, quote_fn, balance_fn, now, mismatch_seen=None, detect=True, budget=None, on_trigger=None,
-               wall=time.time, before_detect=None):
-    """1분 손절 감시 한 번 (2026-10-23 결정, 11J, 11J 보완 3). 보유 종목·손절가 = positions(상태 파일), 현재가 = quote_fn(codes[, deadline]).
+               wall=time.time, before_detect=None, send_budget=None):
+    """1분 손절 감시 한 번 (2026-10-23 결정, 11J, 11J 보완 3, 11U 순서). 보유 종목·손절가 = positions(상태 파일), 현재가 = quote_fn(codes[, deadline]).
     매도 의무 = positions["sell_duty"] (종목 코드 단위: 손절 진행 중·추세 매도). 증권사 잔고가 정답 (OrderManager.duty_sell).
-    ① 계좌 조회 (balance_fn). 성공하면 보유 0 을 기록, 1분 이상 간격 두 번 연속 0 이면 의무를 끝냄 (end_duties)
-    ② 의무 종목마다 같은 분 계좌 매도 가능 수량으로 시장가 (0 이면 걸린 주문 대기). 계좌 조회 실패면 걸린 매도가 없을 때만 보유 파일 수량
-    ③ 새 손절 감지 (시세 조회, 감지 창은 이 감시가 시작된 시각 now, 의무가 있는 종목은 뺌). 새 의무는 on_trigger 로 먼저 저장(선기록)한 뒤 보냄
-    체결 조회는 하지 않는다. budget(초): 시세 조회의 대기 상한 (wall() 기준, 감시 시작부터). 반환: dict
+    ① 보유 시세 조회 (먼저, budget(초) = wall() 기준 감시 시작부터의 대기 상한. 계좌 조회·의무 전송 시간과 무관)
+    ② 계좌 조회 (balance_fn). 성공하면 보유 0 을 기록, 1분 이상 간격 두 번 연속 0 이면 의무를 끝냄 (end_duties)
+    ③ 새 손절 감지 (①의 시세, 감지 창은 이 감시가 시작된 시각 now, 의무가 있는 종목·계좌에 없는 종목은 뺌). 새 의무는 on_trigger 로 먼저 저장(선기록)
+    ④ 매도 전송 대기열 = 새 손절 -> 지난 분에 못 보낸 의무 -> 나머지 의무. 같은 분 계좌 매도 가능 수량으로 시장가 (0 이면 걸린 주문 대기).
+       계좌 조회 실패면 걸린 매도가 없을 때만 보유 파일 수량. send_budget(초): 순회 시간 상한, 넘으면 남은 종목은 다음 분 맨 앞 (om.send_left).
+       11U 보완 2: 그날 마지막 전송 분(om.last_send_minute)은 다음 분이 없으므로 상한 대신 전송 마감까지 (종목마다 한 번)
+       11U 보완 1: before_detect 뒤 수동 확인 상태를 다시 읽어 새로 걸린 종목은 기존 의무 포함 이번 분 전송에서 뺌
+    체결 조회는 하지 않는다. 반환: dict
     11R C: before_detect(prices) 를 주면 시세 조회 뒤·새 손절 감지 전에 부른다 (그날 이벤트 손절가 조정). 돌려준 종목은 이번 분 새 손절 감지에서 뺌"""
     held_pos = {c: p for c, p in positions.get("held", {}).items() if p.get("qty", 0) > 0}
     duty = positions.setdefault("sell_duty", {})
     kind_of = lambda c: (positions.get("held", {}).get(c) or {}).get("kind", "본래")  # noqa: E731
     at = pd.Timestamp(now).strftime("%H:%M:%S")
     wall_end = wall() + budget if budget else None
-    # ① 계좌 조회
+    # ① 보유 시세 조회 (11U: 계좌 조회·기존 의무 전송보다 먼저 -> 의무 전송이 길어도 새 손절 감지의 시세 시간이 줄지 않음)
+    closed0 = closed_codes(positions, now)  # 11N: 오늘 판 종목은 조회·감지 안 함 (계좌 조회 실패한 분에 보유 파일만 보고 다시 감지하지 않음)
+    prices, quote_err, new, base_paused = {}, None, {}, []
+    look = detect and any(c not in closed0 for c in held_pos)
+    if look:
+        try:
+            codes = sorted(c for c in held_pos if c not in closed0)
+            prices = quote_fn(codes, deadline=wall_end) if wall_end else quote_fn(codes)
+        except Exception as e:  # noqa: BLE001  (시세 조회 실패·시간 상한)
+            quote_err = e
+    # ② 계좌 조회
     acct, acct_err, ended, zero = None, None, [], []
     try:
         acct = holdings(check_fields_bal(balance_fn()))  # 모든 쪽을 받고 필드가 맞는 응답만 성공 (R1)
@@ -479,21 +496,22 @@ def stop_cycle(om, watch, positions, quote_fn, balance_fn, now, mismatch_seen=No
     changed = qty_changes(held_pos, acct, om.records, om.date()) if acct is not None else {}
     paused = sorted(c for c, p in held_pos.items() if in_review(p))
     stopped = set(changed) | set(paused)
-    # ② 의무 매도
-    go = {c: x for c, x in duty.items() if c not in stopped}
-    orders = om.send_duties(go, duty_inputs(positions, go, acct), kind_of)
     # ③ 새 손절 감지 (2026-10-24 F-01: 계좌 조회가 됐는데 계좌에 없으면 매도 대상에서 뺀다)
-    not_in_acct = [c for c in held_pos if acct is not None and (c not in acct or acct[c]["qty"] <= 0)]
-    closed = closed_codes(positions, now)  # 11N: 오늘 판 종목 (계좌 조회 실패한 분에 보유 파일만 보고 다시 감지하지 않음)
-    prices, quote_err, new, base_paused = {}, None, {}, []
-    if detect and any(c not in closed for c in held_pos):
+    closed = closed_codes(positions, now)
+    back = sorted(c for c in closed0 if c not in closed and c in held_pos)  # 계좌에 다시 보유가 보여 표시가 풀린 종목 (재매수 등) -> 같은 분에 조회
+    if detect and back:
+        look = True
         try:
-            codes = sorted(c for c in held_pos if c not in closed)
-            prices = quote_fn(codes, deadline=wall_end) if wall_end else quote_fn(codes)
-        except Exception as e:  # noqa: BLE001  (시세 조회 실패·시간 상한)
-            quote_err = e
+            prices = {**prices, **(quote_fn(back, deadline=wall_end) if wall_end else quote_fn(back))}
+        except Exception as e:  # noqa: BLE001
+            quote_err = quote_err or e
+    not_in_acct = [c for c in held_pos if acct is not None and (c not in acct or acct[c]["qty"] <= 0)]
+    if look:
         if before_detect is not None:  # 11R C: 이벤트 손절가 조정이 손절 판단보다 먼저 (기준가를 모르는 종목은 감지 안 함)
             base_paused = sorted(before_detect(prices) or [])
+            # 11U 보완 1: before_detect 가 수동 확인(base_review 등)을 새로 걸었으면 이번 분 기존 의무 전송에서도 뺌 (다시 읽음)
+            paused = sorted(c for c in held_pos if in_review(positions.get("held", {}).get(c)))
+            stopped = set(changed) | set(paused)
         cand = {c: {"cur_price": float(prices[c])} for c in held_pos
                 if c not in duty and c not in not_in_acct and c not in stopped and c not in closed and c in prices and prices[c] > 0
                 and c not in base_paused}
@@ -507,7 +525,16 @@ def stop_cycle(om, watch, positions, quote_fn, balance_fn, now, mismatch_seen=No
                 on_trigger(new)  # 손절 진행 중 표시를 주문 전송 전에 먼저 저장
             for c, rec in new.items():
                 om.notify(f"[손절 진행 중] {c} 현재가 {rec['price']:.0f} < 손절가 {rec['stop']:.0f} — 팔릴 때까지 매 분 시장가 (가격이 반등해도)")
-            orders += om.send_duties({c: duty[c] for c in new}, duty_inputs(positions, new, acct), kind_of)
+    # ④ 매도 전송 (11U: 새 손절 -> 지난 분에 시간 상한으로 못 보낸 의무 -> 나머지, 순회 시간 상한)
+    go = {c: x for c, x in duty.items() if c not in stopped}
+    left0 = [c for c in om.send_left if c in go and c not in new]
+    queue = list(new) + left0 + [c for c in go if c not in new and c not in left0]
+    send_end = wall() + send_budget if send_budget else None
+    last = om.last_send_minute(now)
+    if send_budget and last:  # 11U 보완 2: 그날 마지막 전송 분은 다음 분이 없음 -> 20초 상한 없이 전송 마감(stop_send_until)까지
+        send_end = wall() + max(0.0, (last - pd.Timestamp(om.clock())).total_seconds())
+    orders = om.send_duties({c: go[c] for c in queue}, duty_inputs(positions, queue, acct), kind_of, deadline=send_end, wall=wall)
+    om.send_left = [x["code"] for x in orders if x.get("deferred")]
     diff = None
     if acct is not None:
         a = {c: h["qty"] for c, h in acct.items() if h["qty"] > 0}
@@ -523,7 +550,8 @@ def stop_cycle(om, watch, positions, quote_fn, balance_fn, now, mismatch_seen=No
     return {"orders": orders, "quotes": prices, "account_ok": acct is not None, "account_error": str(acct_err)[:150] if acct_err else None,
             "mismatch": diff, "not_in_account": not_in_acct, "triggered_new": new, "duties": sorted(duty), "duty_ended": ended,
             "duty_zero": zero, "acct": acct, "qty_changed": changed, "review_paused": paused, "closed_today": sorted(closed),
-            "quote_error": str(quote_err)[:150] if quote_err else None, "base_paused": base_paused}
+            "quote_error": str(quote_err)[:150] if quote_err else None, "base_paused": base_paused, "send_deferred": list(om.send_left),
+            "last_send_minute": bool(last)}
 
 
 def unexplained_diff(state, acct, records, date):
@@ -696,6 +724,7 @@ class OrderManager:
                   "stop_send_until": t.get("stop_send_until", "15:29:00")}
         self.store = store if store is not None else _MemStore(clock)
         self.next_open_sells = []
+        self.send_left = []  # 11U: 지난 손절 감시에서 전송 순회 시간 상한으로 못 보낸 의무 종목 (다음 분에 먼저)
         self.alerted_unresolved = set()
         self.corrupt_alerted = False
 
@@ -989,10 +1018,17 @@ class OrderManager:
                 out[c] = {"since": f"{self.date()} {at}", "price": float(h["cur_price"]), "stop": float(s)}
         return out
 
-    def send_duties(self, duties, inputs, kind_of=lambda c: "본래"):
+    def last_send_minute(self, now):
+        """11U 보완 2: now 가 그날 마지막 전송 분(전송 마감 stop_send_until 직전 1분, 보통 15:28:00 ~ 15:28:59, 거래시간 변경일은 함께 밀린 시각)이면
+        전송 마감 시각(Timestamp), 아니면 None"""
+        end = pd.Timestamp(f"{self.date()} {self.t['stop_send_until']}")
+        return end if end - pd.Timedelta(minutes=1) <= pd.Timestamp(now) < end else None
+
+    def send_duties(self, duties, inputs, kind_of=lambda c: "본래", deadline=None, wall=time.time):
         """09:00 ~ 15:29 매도 의무 시장가 (15:20 뒤는 마감 동시호가 = 종가 체결). duties = {code: 의무 표시(new_duty)}, inputs = duty_inputs.
         손절 진행 중(kind stop) = 단계 stop, 추세 매도(kind trend) = 단계 trend_late ("시가 매도 아님", 08:30 ~ 08:59 에 못 판 것·남은 수량).
-        거부 횟수 상한 없음 (retry_wait 로 간격만 늘림). 한 종목은 한 분에 한 번"""
+        거부 횟수 상한 없음 (retry_wait 로 간격만 늘림). 한 종목은 한 분에 한 번. 11U: deadline(wall() 기준)이 지나면 남은 종목은 보내지 않고
+        {deferred, code} (다음 분에 다시)"""
         now = self.hms()
         if not (self.t["stop_from"] <= now < self.t["stop_send_until"]):
             return []
@@ -1002,6 +1038,9 @@ class OrderManager:
         for c, du in duties.items():
             h = inputs.get(c)
             if h is None:
+                continue
+            if deadline is not None and wall() >= deadline:
+                out.append({"deferred": "전송 순회 시간 상한 -> 다음 분에 먼저", "code": c})
                 continue
             if du.get("kind", "stop") == "stop":
                 seen = " ".join(x for x in (du.get("since"), du.get("at")) if x)
@@ -1056,10 +1095,17 @@ class OrderManager:
 
     def _cancel(self, r, remain, oso_rows):
         """취소도 의도로 기록 (SENDING -> ACCEPTED / REJECTED / UNKNOWN). 같은 원주문에 ACCEPTED·UNKNOWN·SENDING 취소가 있으면 다시 안 보냄.
-        거부된 취소는 정산을 다시 돌릴 때 2회까지 다시 보낸다"""
+        거부된 취소는 정산을 다시 돌릴 때 CANCEL_MAX(2)회까지 다시 보낸다. 11V: 일반 주문처럼 NOT_SENT(유량·인증 등 서버에 안 닿음)는 횟수에 안 세고
+        마지막 NOT_SENT 뒤 CANCEL_GAP_SEC(30초)가 지났으면 다시 (안전 상한 CANCEL_NOT_SENT_MAX)"""
         d = self.date()
         prev = [i for i in self.records if i["stage"] == "cancel" and i.get("orig_ord_no") == r["ord_no"]]
-        if any(i["status"] in BLOCKING for i in prev) or len(prev) >= 2:
+        if any(i["status"] in BLOCKING for i in prev):
+            return prev[-1]
+        tried = [i for i in prev if i["status"] in (REJECTED, UNKNOWN)]
+        unsent = [i for i in prev if i["status"] == NOT_SENT]
+        if len(tried) >= CANCEL_MAX or len(unsent) >= CANCEL_NOT_SENT_MAX:
+            return prev[-1]
+        if prev and prev[-1]["status"] == NOT_SENT and                 self.clock() < pd.Timestamp(f"{d} {str(prev[-1].get('created', '00:00:00'))[:8]}") + pd.Timedelta(seconds=CANCEL_GAP_SEC):
             return prev[-1]
         it = self.store.add(date=d, stage="cancel", side="cancel", code=r["code"], qty=int(remain), price=None, trde_tp="cancel",
                             attempt=len(prev) + 1, kind=r.get("kind"), reason="15:35 미체결 잔량 취소", assumed_kind="cancel",

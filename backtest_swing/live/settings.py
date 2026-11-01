@@ -2,8 +2,10 @@
 
 11K 보완 6: config.example.json 을 기본값으로 깔고 config.json 을 그 위에 키 단위로 깊게 덮어쓴다 (times 같은 하위 항목도 키마다).
 config.json 에 없는 키(예전에 복사한 뒤 예시에 새로 생긴 키)는 기본값이 들어가고, 채운 키는 cfg["_filled"] 에 "times.stop_send_until" 처럼 남는다.
-11K 보완 8: 환경 변수 LIVE_CONFIG=example 이면 config.json 을 읽지 않는다 (시험 격리: 서브 PC 의 오래된 config.json 이 시험에 섞이지 않게)."""
+11K 보완 8: 환경 변수 LIVE_CONFIG=example 이면 config.json 을 읽지 않는다 (시험 격리: 서브 PC 의 오래된 config.json 이 시험에 섞이지 않게).
+11T: 주문 계획 스냅샷 시각은 times.plan_snapshot 하나. 그 시각에 묶인 시각은 상대값으로 채운다 (snapshot_times)."""
 import copy
+import datetime
 import json
 import os
 import sys
@@ -11,6 +13,25 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 EXAMPLE = os.path.join(HERE, "config.example.json")
 LOCAL = os.path.join(HERE, "config.json")
+
+
+# 11T (2026-11-02 스냅샷 15:18:30 -> 15:20:01): 주문 계획 스냅샷(plan_snapshot)에서 상대값(초)으로 정하는 시각. 간격은 15:18:30 때와 같다
+# (데이터 확인 15:17:00, 다시 적재 채택 경계 15:18:00, 장중 재수집 공개 마감 15:13:00·시작 마감 15:10:00, 공식 시세 재시도·월별 따라잡기 마감 15:00:00)
+SNAPSHOT_RELATIVE = {"data_check": -90, "no_reload_after": -30, "refetch_publish_by": -330, "refetch_start_until": -510,
+                     "official_retry_until": -1110, "monthly_deadline": -1110}
+# config.json 에 남아 있어도 쓰지 않는 예전 키 (서브 PC config.json 은 예전 config.example.json 을 통째로 복사한 것이라 snapshot 15:18:30 등이 들어 있음)
+LEGACY_SNAPSHOT_KEYS = ("snapshot", "measure_snapshot", "measure_until", *SNAPSHOT_RELATIVE)
+
+
+def snapshot_times(times):
+    """times(제자리)에 snapshot = plan_snapshot 과 SNAPSHOT_RELATIVE 시각을 채운다. 예전 키는 버린다.
+    반환: 버린 예전 키 중 새 값과 다른 것 {키: 예전 값} (시작 때 상주 로그 경고)"""
+    s = datetime.datetime.strptime(f"2000-01-01 {times['plan_snapshot']}", "%Y-%m-%d %H:%M:%S")
+    new = {"snapshot": times["plan_snapshot"],
+           **{k: (s + datetime.timedelta(seconds=v)).strftime("%H:%M:%S") for k, v in SNAPSHOT_RELATIVE.items()}}
+    old = {k: times.pop(k) for k in LEGACY_SNAPSHOT_KEYS if k in times}
+    times.update(new)
+    return {k: v for k, v in old.items() if new.get(k) != v}
 
 
 def merge(base, over, path="", filled=None):
@@ -44,6 +65,7 @@ def load(path=None, example=None):
         if not os.path.isabs(cfg[k]):
             cfg[k] = os.path.join(root, cfg[k])
     cfg["_filled"], cfg["_source"] = filled, src
+    cfg["_legacy_times"] = snapshot_times(cfg["times"])
     return cfg
 
 

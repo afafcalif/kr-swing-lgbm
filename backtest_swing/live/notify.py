@@ -253,7 +253,7 @@ def resend_pending(pending_path, log_path=None, sender=None, chunk=10):
 
 
 def send(text, log_path=None, sender=None):
-    """반환: 보냈으면 True. sender 는 시험용 (기본은 텔레그램 HTTP)"""
+    """반환: 보냈으면 True (11V: 그 밖은 False, 예외도 False — 부른 쪽이 실패면 다음에 다시). sender 는 시험용 (기본은 텔레그램 HTTP)"""
     line = f"{pd.Timestamp.now():%Y-%m-%d %H:%M:%S} {text}"
     if log_path:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
@@ -261,7 +261,10 @@ def send(text, log_path=None, sender=None):
             f.write(line + "\n")
     token, chat = _env()
     if sender is not None:
-        return sender(text)
+        try:
+            return bool(sender(text))
+        except Exception:  # noqa: BLE001
+            return False
     if not token or not chat:
         return False
     import requests
@@ -279,3 +282,49 @@ def send(text, log_path=None, sender=None):
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"{pd.Timestamp.now():%Y-%m-%d %H:%M:%S}   -> 텔레그램 {'보냄' if ok else '보내지 못함'}\n")
     return ok
+
+
+class Repeat:
+    """11V: 같은 종류 오류 알림 묶기. 종류 = 숫자·주소만 다른 같은 글 (repeat_key). 처음 1번은 바로 보내고, 그 뒤 같은 종류는 세기만 해서
+    window 분마다 요약 1번 ("계속 중" / 그 창 끝 무렵 이미 멎었으면 "그침"), "계속 중" 뒤 한 창 동안 더 없으면 "[오류 그침]" 1번 뒤 잊음.
+    시각은 부르는 쪽이 줌 (시험)"""
+
+    def __init__(self, window_min=10):
+        self.win = pd.Timedelta(minutes=window_min)
+        self.seen, self.lock = {}, threading.Lock()
+
+    @staticmethod
+    def repeat_key(msg):
+        import re
+        return re.sub(r"0x[0-9a-fA-F]+|\d+", "#", str(msg))[:160]
+
+    def offer(self, msg, t):
+        """보낼 글(처음·조용해진 뒤)이면 msg, 묶었으면 None"""
+        t = pd.Timestamp(t)
+        k = self.repeat_key(msg)
+        with self.lock:
+            e = self.seen.get(k)
+            if e is None:
+                self.seen[k] = {"sent": t, "last": t, "n": 0, "msg": msg}
+                return msg
+            e.update(n=e["n"] + 1, last=t, msg=msg)
+            return None
+
+    def due(self, t):
+        """지금 보낼 요약 글 목록"""
+        t = pd.Timestamp(t)
+        out = []
+        with self.lock:
+            for k, e in list(self.seen.items()):
+                if t - e["sent"] < self.win:
+                    continue
+                if e["n"]:
+                    still = t - e["last"] < self.win
+                    out.append(f"[오류 반복] 같은 오류 {e['n']}번 더 ({e['sent']:%H:%M} 뒤 ~ 마지막 {e['last']:%H:%M:%S}, "
+                               f"{'계속 중' if still else '그침'}): {e['msg']}"[:400])
+                    e.update(n=0, sent=t, open=still)
+                else:  # 한 창 동안 더 없음 -> 잊음 (다음에 나오면 처음처럼 바로). 직전 요약이 "계속 중"이었으면 그쳤다고 1번
+                    if e.get("open"):
+                        out.append(f"[오류 그침] 같은 오류가 마지막 {e['last']:%H:%M:%S} 뒤 {self.win.seconds // 60}분 동안 더 없음: {e['msg']}"[:400])
+                    self.seen.pop(k)
+        return out

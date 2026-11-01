@@ -54,6 +54,23 @@ def index_now(caller):
     return out, raw
 
 
+def index_bar(caller, day, hhmm):
+    """11T: 주문 계획 스냅샷의 지수 = ka20005 업종 1분봉의 hhmm 봉 종가 (15:20:01 스냅샷이면 "1519" 봉, 3A 판정과 같은 값, 2026-10-23 결정).
+    1분봉 시각은 봉의 시작 ("1519" = 15:19:00 ~ 15:19:59). 그 봉이 아직 없으면 RuntimeError (스냅샷 단계가 60초 뒤 다시). 반환 (값 {kospi, kosdaq}, 기록)"""
+    out, raw, d = {}, {}, pd.Timestamp(day).strftime("%Y%m%d")
+    for name, _, inds in INDEX:
+        j, _, _ = caller.post("ka20005", "/api/dostk/chart", {"inds_cd": inds, "tic_scope": "1"})
+        recv = pd.Timestamp.now().strftime("%H:%M:%S.%f")[:-3]
+        bars = j.get("inds_min_pole_qry", []) or []
+        b = [num(it.get("cur_prc")) / 100.0 for it in bars if str(it.get("cntr_tm", ""))[:12] == d + hhmm]
+        last = max((str(it.get("cntr_tm", "")) for it in bars if str(it.get("cntr_tm", ""))[:8] == d), default=None)
+        if not b or not (b[0] > 0):
+            raise RuntimeError(f"ka20005 {name} {hhmm} 봉 없음 (그날 마지막 봉 {last})")
+        out[name] = b[0]
+        raw[name] = {"bar": d + hhmm, "close": b[0], "last_bar": last, "_recv": recv}
+    return out, raw
+
+
 def bars_today(caller, code, day):
     """ka10080 1분봉 첫 페이지 (최근 900봉) 에서 그날 15:30 까지"""
     j, _, _ = caller.post("ka10080", "/api/dostk/chart", {"stk_cd": code, "tic_scope": "1", "upd_stkpc_tp": "0"})

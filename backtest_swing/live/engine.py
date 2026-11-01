@@ -20,7 +20,7 @@ import time
 
 # 11O: OpenBLAS(numpy·scipy 에 들어 있음)는 불러올 때 CPU 스레드 수만큼 버퍼를 잡아 프로세스마다 커밋 약 0.5~1GB (작업 프로세스 12개 = 수 GB).
 # 계산은 BLAS 를 쓰지 않으므로 1 스레드로 (결과 같음, 2026-10-23 스냅샷 전 특징·점수 차이 0). 이 뒤에 띄우는 자식 프로세스(작업 프로세스·rerun)가 물려받는다
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ["OPENBLAS_NUM_THREADS"] = "1"  # 11V: 강제 (환경 변수에 다른 값이 있어도)
 
 import numpy as np
 import pandas as pd
@@ -83,7 +83,7 @@ BASE_EVENT = 0.005  # 11Q A: 기준가 / 전날 원주가 종가 가 이만큼(0
 
 def default_factor(adj, raw, day, flags=None, base=None, prev_day=None):
     """오늘 행의 factor·vscale: 전날 행 값 (빈칸이면 1). flags 를 주면 기본값 1.0 으로 대체했는지 기록 (2026-10-24 B7).
-    11Q A: base(그날 기준가, 15:18 스냅샷)가 있고 저장 이력 마지막 행이 prev_day(직전 거래일)이면, k = 기준가 / 그 행 원주가 종가 가
+    11Q A: base(그날 기준가, 주문 계획 스냅샷)가 있고 저장 이력 마지막 행이 prev_day(직전 거래일)이면, k = 기준가 / 그 행 원주가 종가 가
     BASE_EVENT 넘게 1 과 다를 때(분할·병합·권리락 등 그날 이벤트) 오늘 factor = 전날 factor / k, vscale = 전날 vscale x k
     (키움 수정주가 계수 변화 = 기준가 / 전날 종가, 2025-03 ~ 2026-10 643건 0.1% 안). 저장 이력이 이벤트 전 기준이면 오늘 행을 그 기준으로,
     이미 새 기준(이전 행 factor = k)이면 오늘 factor 1 이 된다. 평소(차이 0.5% 미만·기준가 없음)는 예전과 같은 값"""
@@ -322,17 +322,20 @@ class ShardPool:
         except (BrokenPipeError, EOFError, OSError) as e:
             raise PoolError(f"작업 프로세스 {i} 보내기 실패: {e!r}") from e
 
-    def compute(self, day, rows, ledger_from):
+    def compute(self, day, rows, ledger_from, timeout=None):
+        """timeout: 작업 프로세스 응답 대기 상한 (초, 없으면 call_timeout). 11T 보완: 주문 계획은 짧게 (config plan_call_timeout).
+        넘으면 PoolError -> 응답이 늦게 와 파이프가 어긋날 수 있으므로 그 묶음은 버린다 (resident.plan_pool_error)"""
         with self.lock:
-            return self._compute(day, rows, ledger_from)
+            return self._compute(day, rows, ledger_from, timeout)
 
-    def _compute(self, day, rows, ledger_from):
+    def _compute(self, day, rows, ledger_from, timeout=None):
         for i, sh in enumerate(self.shards):
             s = set(sh)
             self._send(i, ("compute", (day, {k: v for k, v in rows.items() if k in s}, {k: v for k, v in ledger_from.items() if k in s})))
         out, arrs, errs = [], {}, []
+        end = time.time() + timeout if timeout else None  # 묶음 전체 상한 (작업 프로세스마다 따로 기다리지 않음)
         for i in range(len(self.conns)):
-            _, o, a, e = self._recv(i)
+            _, o, a, e = self._recv(i, max(0.1, end - time.time()) if end else None)
             out += o
             arrs.update(a)
             errs += e
@@ -514,8 +517,8 @@ def pick_top(e, ledger_status_list, day):
     return [int(i - n0) for i in picks if i >= n0], len(led_picked) == n0
 
 
-def run_day(pool, day, rows, index, index_values, boosters, cols, ledger, frozen_market=False):
-    """rows: code -> (sv, f, vscale). ledger: 거래 목록 하나 또는 {장부 이름: 거래 목록}.
+def run_day(pool, day, rows, index, index_values, boosters, cols, ledger, frozen_market=False, call_timeout=None):
+    """rows: code -> (sv, f, vscale). ledger: 거래 목록 하나 또는 {장부 이름: 거래 목록}. call_timeout: 작업 프로세스 응답 대기 상한 (초, 11T 보완).
     반환 dict (장부별 상위 3·장부 상태, 대상 표, 시간). 장부가 하나면 top3 등은 그 장부 것."""
     t0 = time.time()
     day = pd.Timestamp(day)
@@ -525,7 +528,7 @@ def run_day(pool, day, rows, index, index_values, boosters, cols, ledger, frozen
         for tr in trs:
             e = pd.Timestamp(tr["entry"])
             ledger_from[tr["code"]] = min(e, ledger_from.get(tr["code"], e))
-    out, arrs, errs = pool.compute(day, rows, ledger_from)
+    out, arrs, errs = pool.compute(day, rows, ledger_from, **({"timeout": call_timeout} if call_timeout else {}))
     t1 = time.time()
     fr = pd.DataFrame(out)
     e = fr[fr.eligible].copy().sort_values("code").reset_index(drop=True) if len(fr) else fr

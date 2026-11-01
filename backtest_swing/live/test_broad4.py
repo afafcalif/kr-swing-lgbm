@@ -1,5 +1,5 @@
 """
-Codex 확인(d4d6c64..27b70e7) 반영 (11J 보완 3 R1 ~ R4, 2026-10-27) 재현 시험.
+Codex 확인(<커밋>..<커밋>) 반영 (11J 보완 3 R1 ~ R4, 2026-10-27) 재현 시험.
 가짜 서버·가짜 시계·가짜 토큰 서버, 실제 주문·조회·토큰 발급·logs/exec 없음.
 
   python -m unittest backtest_swing/live/test_broad4.py -v
@@ -104,9 +104,9 @@ class PartialPages(unittest.TestCase):
 
 
 class OldListNewTrade(Base):
-    """R2: trade_id 없는 옛 형식(d4d6c64) 목록 항목은 날짜가 지금 보유 거래의 진입일보다 뒤일 때만 의무. 아니면 사람 확인 알림"""
+    """R2: trade_id 없는 옛 형식(<커밋>) 목록 항목은 날짜가 지금 보유 거래의 진입일보다 뒤일 때만 의무. 아니면 사람 확인 알림"""
 
-    def test_d4d6c64_list_with_new_holding(self):
+    def test_prevcommit_list_with_new_holding(self):
         old = {"held": {"990006": {"qty": 28, "trade_id": "990006-2026-10-23-5", "entry_date": "2026-10-23", "stop_price": 1.0},   # 10-23 다시 산 새 거래
                         "000660": {"qty": 5, "trade_id": "000660-2026-10-20-2", "entry_date": "2026-10-20", "stop_price": 1.0},
                         "005930": {"qty": 10, "trade_id": "005930-2026-10-20-3", "entry_date": "2026-10-20", "stop_price": 1.0}},

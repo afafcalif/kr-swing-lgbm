@@ -9,6 +9,7 @@
   같은 기록의 실제 체결·주문 가격, 체결 금액, 체결 수량(10주 이상)도 실행 쪽 파일·문서에 남아 있으면 실패한다
   (명세·시험에 인용된 체결 값은 FILL_TEMPLATES 로 가짜 체결로 바꿈).
 - ALLOW 에 적은 파일만 복사한다. DENY 에 걸리는 경로는 ALLOW 에 있어도 복사하지 않고 실패한다.
+- 비공개 저장소 커밋 해시(명세·시험 주석의 인용)는 `<커밋>` 으로 바꾸고, 저장소 어디에든 남아 있으면 검사 실패.
 - 개인 경로·저장소 이름 같은 서술은 일반 표현으로 바꾼다 (REWRITE, PATH_REWRITE). 바꿀 곳이 없으면 실패
   (원본이 바뀐 것을 놓치지 않게).
 - 복사본은 임시 폴더에 먼저 만들고 검사를 통과해야 저장소에 쓴다. 쓴 뒤 저장소 전체를 한 번 더 검사한다.
@@ -46,9 +47,10 @@ ALLOW = [
         "test_broad6.py", "test_broad7.py", "test_broad8.py", "test_broad9.py", "test_broad10.py",
         "test_broad11.py", "test_broad12.py",
         "test_backup.py", "test_basefactor.py", "test_closed.py", "test_codex.py", "test_confirm.py",
-        "test_failshare.py", "test_fetchfill.py", "test_fix.py", "test_fix11r.py", "test_intraday.py",
-        "test_memcash.py", "test_mock1.py", "test_orders.py", "test_rebase.py", "test_safety.py", "test_second.py",
-        "test_swap.py", "test_third.py",
+        "test_failshare.py", "test_fetchfill.py", "test_fix.py", "test_fix11r.py", "test_fix11u.py",
+        "test_fix11uv.py", "test_fix11v.py", "test_intraday.py", "test_memcash.py", "test_mock1.py",
+        "test_orders.py", "test_rebase.py", "test_safety.py", "test_second.py", "test_snap1520.py", "test_swap.py",
+        "test_third.py",
         # 시험용 고정 자료: 과거 일봉(일봉 파일 일부)·KRX 공식 시세 (공개 정보). 보유·주문 종목이면 --held 가림이 바꾼다
         "testdata/rebase_real.json",
     )),
@@ -387,6 +389,42 @@ def held_values(dirs: list[str]) -> set[str]:
     return toks
 
 
+HEX_TOKEN = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])")
+
+
+def private_commits(src: Path, tokens) -> set[str]:
+    """tokens 중 비공개 저장소의 커밋을 가리키는 것 (짧은 해시 포함)"""
+    toks = sorted(set(tokens))
+    if not toks:
+        return set()
+    out = subprocess.run(["git", "-C", str(src), "cat-file", "--batch-check"], input="".join(t + "^{commit}\n" for t in toks),
+                         capture_output=True, text=True, check=True).stdout.splitlines()
+    return {t for t, line in zip(toks, out) if line.split()[1:2] == ["commit"]}
+
+
+def mask_commits(stage: Path, src: Path, rels) -> None:
+    """비공개 저장소 커밋 해시를 일반 표현으로 (명세·시험 주석의 '<해시> 에서 실패 확인' 같은 인용)"""
+    texts = {p: (stage / p).read_bytes().decode("utf-8") for p in rels}
+    found = private_commits(src, (m.group(0) for t in texts.values() for m in HEX_TOKEN.finditer(t)))
+    for p, t in texts.items():
+        t2 = HEX_TOKEN.sub(lambda m: m.group(0) if m.group(0) not in found else (
+            "prevcommit" if "_" in t[max(m.start() - 1, 0):m.start()] + t[m.end():m.end() + 1] else "<커밋>"), t)  # 이름 안이면 식별자로
+        if t2 != t:
+            (stage / p).write_bytes(t2.encode("utf-8"))
+
+
+def commit_hits(root: Path, src: Path, rels) -> list[tuple[str, str]]:
+    texts = {rel: (root / rel).read_bytes().decode("utf-8", errors="replace") for rel in rels}
+    found = private_commits(src, (m.group(0) for t in texts.values() for m in HEX_TOKEN.finditer(t)))
+    hits = []
+    for rel, t in texts.items():
+        if found:
+            for i, line in enumerate(t.splitlines()):
+                hits += [(f"{rel}:{i + 1}:{m.start() + 1}", "private-commit") for m in HEX_TOKEN.finditer(line)
+                         if m.group(0) in found]
+    return hits
+
+
 def value_hits(root: Path, rels, toks) -> list[tuple[str, str]]:
     """실제 체결 가격·금액·수량 문구가 남은 곳 (값은 출력하지 않음)"""
     if not toks:
@@ -395,8 +433,14 @@ def value_hits(root: Path, rels, toks) -> list[tuple[str, str]]:
     hits = []
     for rel in rels:
         for i, line in enumerate((root / rel).read_bytes().decode("utf-8", errors="replace").splitlines()):
+            if INDEX_BAR_LINE.search(line):
+                continue
             hits += [(f"{rel}:{i + 1}:{m.start() + 1}", "held-fill-value") for m in rx.finditer(line)]
     return hits
+
+
+# 시험의 가짜 업종(지수) 1분봉 응답 줄: 업종 코드 "001"·"101" 의 (체결 시각 14자리, 지수 x 100) 쌍이라 종목 체결가와 무관
+INDEX_BAR_LINE = re.compile(r'"(?:001|101)": \[\("\d{14}", "[+-]?\d+"\)')
 
 
 def held_codes(dirs: list[str]) -> set[str]:
@@ -574,6 +618,7 @@ def apply_rewrites(stage: Path, src: Path, held: set[str], names: dict[str, str]
             t = f.read_bytes().decode("utf-8")
             t = rx.sub(lambda m: masks[m.group(1)], t) if rx else t
             f.write_bytes(mask_names(t, names).encode("utf-8"))
+    mask_commits(stage, src, [p for p in ALLOW if is_text(p)])
     return errs, fill_toks
 
 
@@ -647,6 +692,7 @@ def main() -> int:
     scoped = [f for f in files if f.startswith(held_scope) and is_text(f)]
     hits += held_hits(DST, scoped, held)
     hits += value_hits(DST, [f for f in scoped if not f.startswith(LIGHT_PREFIXES)], held_vals)
+    hits += commit_hits(DST, src, [f for f in files if is_text(f)])
     if hits:
         report("저장소 검사 실패", hits)
         return 1

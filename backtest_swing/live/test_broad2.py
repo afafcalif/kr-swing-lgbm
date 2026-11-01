@@ -1,5 +1,5 @@
 """
-Codex 확인(48efca9..b444c85) 반영(11J 보완, 2026-10-26) 재현 시험. 가짜 서버·가짜 시계, 실제 주문·조회·logs/exec 없음.
+Codex 확인(<커밋>..<커밋>) 반영(11J 보완, 2026-10-26) 재현 시험. 가짜 서버·가짜 시계, 실제 주문·조회·logs/exec 없음.
 
   python -m unittest backtest_swing/live/test_broad2.py -v
 """
@@ -42,7 +42,8 @@ def positions(duty=None, **extra):
 
 
 class Order(unittest.TestCase):
-    """1·5 (11J 보완 2 로 바뀜): ① 계좌 조회 -> ② 손절 진행 중·추세 매도 (같은 분 계좌 매도 가능 수량) -> ③ 새 감지. 계좌 조회 실패면 보유 파일 수량"""
+    """1·5 (11J 보완 2, 11U 로 바뀜): ① 시세 조회 -> ② 계좌 조회 -> ③ 새 감지 -> ④ 새 손절·손절 진행 중·추세 매도 (같은 분 계좌 매도 가능 수량).
+    계좌 조회 실패면 보유 파일 수량"""
 
     def test_1_account_then_duty_then_detect(self):
         clk, fk, om, _ = setup()
@@ -61,9 +62,11 @@ class Order(unittest.TestCase):
             log.append(("quote", round(deadline - time.time(), 1)))
             return {"990006": 31000.0, "005930": 49000.0}                          # 990006 반등, 005930 새로 손절
         r = O.stop_cycle(om, O.AccountWatch(), pos, quote, bal, clk(), set(), budget=10)
-        self.assertEqual([x[0] for x in log], ["account", "send", "quote", "send"])
-        self.assertEqual((log[1][1], log[1][2]), ("990006", 28))                 # 같은 분 계좌 매도 가능 수량
-        self.assertLessEqual(log[2][1], 10.0)                                     # 10초 상한은 시세 조회에
+        # 11U: 시세 조회 먼저 (의무 전송 시간과 무관) -> 계좌 -> 새 손절 먼저 전송 -> 기존 의무
+        self.assertEqual([x[0] for x in log], ["quote", "account", "send", "send"])
+        self.assertEqual((log[2][1], log[2][2]), ("005930", 10))
+        self.assertEqual((log[3][1], log[3][2]), ("990006", 28))                 # 같은 분 계좌 매도 가능 수량
+        self.assertLessEqual(log[0][1], 10.0)                                     # 10초 상한은 시세 조회에
         self.assertEqual(r["triggered_new"].keys(), {"005930"})
 
     def test_1_5_account_and_quotes_fail_still_sells_triggered_and_trend(self):

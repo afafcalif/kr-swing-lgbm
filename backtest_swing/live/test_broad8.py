@@ -1,5 +1,5 @@
 """
-Codex 확인(d8cb441..aba7392) 반영 + 서브 PC update 실패 원인 (11K 보완 2, 2026-10-27) 재현 시험. 가짜 서버·가짜 시계, 실제 주문·조회·logs/exec·data 없음.
+Codex 확인(<커밋>..<커밋>) 반영 + 서브 PC update 실패 원인 (11K 보완 2, 2026-10-27) 재현 시험. 가짜 서버·가짜 시계, 실제 주문·조회·logs/exec·data 없음.
 
   python -m unittest backtest_swing/live/test_broad8.py -v
 """
@@ -126,8 +126,8 @@ class Settings(unittest.TestCase):
         return p
 
     def test_deep_merge_fills_missing_keys(self):
-        cfg = settings.load(path=self.stale(drop=("stop_send_until", "measure_snapshot")))
-        self.assertEqual(sorted(cfg["_filled"]), ["commission", "times.measure_snapshot", "times.stop_send_until"])
+        cfg = settings.load(path=self.stale(drop=("stop_send_until", "plan_snapshot")))
+        self.assertEqual(sorted(cfg["_filled"]), ["commission", "times.plan_snapshot", "times.stop_send_until"])
         self.assertEqual((cfg["times"]["stop_send_until"], cfg["root"], cfg["orders_enabled"]), ("15:29:00", "D:/kr-swing-lgbm", True))   # PC 값은 그대로
         self.assertEqual(cfg["commission"]["mock"], 0.0035)
         self.assertTrue(cfg["state_dir"].startswith("D:/kr-swing-lgbm"))

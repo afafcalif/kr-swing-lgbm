@@ -1,5 +1,5 @@
 """
-e6b7f4d Codex 확인 리뷰 반영 (11L 보완, 2026-10-28) 재현 시험. 실제 키움 클라이언트(kiwoom/client.py) 경로 + 가짜 서버(TR 별 간격 위반 = HTTP 429) + 가짜 시계.
+<커밋> Codex 확인 리뷰 반영 (11L 보완, 2026-10-28) 재현 시험. 실제 키움 클라이언트(kiwoom/client.py) 경로 + 가짜 서버(TR 별 간격 위반 = HTTP 429) + 가짜 시계.
 실제 주문·조회·logs/exec·data 없음.
 
   python -m unittest backtest_swing/live/test_broad11.py -v
@@ -86,7 +86,7 @@ class RealClientGap(unittest.TestCase):
         a = b.account()
         om.place_buys(PLAN3, "본래", orderable=a["orderable"])
         self.assertEqual(len(sends(self.fk)), 3)
-        self.assertTrue(all(g >= 1.2 for g in self.gaps("kt10000")), self.gaps("kt10000"))   # e6b7f4d: [1.0, 1.0] (공용 예약 뒤 클라이언트 제한기가 더 늦춤)
+        self.assertTrue(all(g >= 1.2 for g in self.gaps("kt10000")), self.gaps("kt10000"))   # <커밋>: [1.0, 1.0] (공용 예약 뒤 클라이언트 제한기가 더 늦춤)
         self.assertEqual(self.fk.r429, [])
         self.assertIsNotNone(c.send_gate)                                          # 공용 제한기가 클라이언트의 전송 바로 앞 대기 (하나)
         self.assertEqual([i["status"] for i in om.records], [O.ACCEPTED] * 3)
