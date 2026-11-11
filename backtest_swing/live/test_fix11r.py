@@ -7,6 +7,7 @@
 
   python -m unittest backtest_swing/live/test_fix11r.py -v
 """
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import testguard; testguard.install()  # noqa: E401,E402,E702  (첫 줄 유지)
 import os  # noqa: E402
 os.environ["LIVE_CONFIG"] = "example"
 import json
@@ -102,11 +103,11 @@ class Inherit(TR.Env):
         self.assertNotIn("117670", self.daily.Store(["117670"]).adj)
 
 
-HELD = {"qty": 28, "trade_id": "990006-2026-10-22-1", "entry_date": "2026-10-22", "kind": "본래", "judged_on": "2026-10-23"}
+HELD = {"qty": 28, "trade_id": "990010-2026-10-22-1", "entry_date": "2026-10-22", "kind": "본래", "judged_on": "2026-10-23"}
 
 
 class Stops(TR.Base):
-    """990006: 10-22 진입 (진입일 공식 손절가 42,665), 10-23 무상증자 권리락 (기준가 30,000 / 전날 종가 45,000) -> 손절가 28,443"""
+    """990010: 10-22 진입 (진입일 공식 손절가 42,665), 10-23 무상증자 권리락 (기준가 30,000 / 전날 종가 45,000) -> 손절가 28,443"""
     go, held = TR.Held.go, TR.Held.held
 
     def setUp(self):
@@ -132,11 +133,11 @@ class Stops(TR.Base):
     def test_recovery_keeps_event_adjusted_stop(self):
         p = self.after_event()
         self.assertAlmostEqual(p["stop_price"], 28443.333333, places=3)
-        P.save(self.R.POSITIONS, {"held": {"990006": p}, "sell_duty": {}, "next_open_sells": {}, "trade_seq": 1, "duty_format": P.DUTY_FORMAT})
-        self.fk.balance_rows = [bal_row("990006", 28)]
+        P.save(self.R.POSITIONS, {"held": {"990010": p}, "sell_duty": {}, "next_open_sells": {}, "trade_seq": 1, "duty_format": P.DUTY_FORMAT})
+        self.fk.balance_rows = [bal_row("990010", 28)]
         res = self.started("08:10:00", live=False)
         res.day.set("prev_recovery", {"prev": "2026-10-23"})
-        fx = {"prev": "2026-10-23", "stops": {"990006": {"stop": 42665.0, "basis": "진입일 2026-10-22 공식 일봉", "basis_date": "2026-10-22"}},
+        fx = {"prev": "2026-10-23", "stops": {"990010": {"stop": 42665.0, "basis": "진입일 2026-10-22 공식 일봉", "basis_date": "2026-10-22"}},
               "trend": {}, "left": [], "at": "08:05:00"}
         res.apply_recovery_fixes(fx)
         h = self.held()
@@ -193,7 +194,7 @@ class Stops(TR.Base):
         self.clk.at("09:00:00")
         r = res.stop_minute()
         self.assertEqual(r["base_paused"], [])
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990010"])
 
 
 if __name__ == "__main__":

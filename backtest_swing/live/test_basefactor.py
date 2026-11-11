@@ -4,6 +4,7 @@ F 아침 기준가 측정(조회만, 별도 스레드). 가짜 서버·가짜 �
 
   python -m unittest backtest_swing/live/test_basefactor.py -v
 """
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import testguard; testguard.install()  # noqa: E401,E402,E702  (첫 줄 유지)
 import os  # noqa: E402
 os.environ["LIVE_CONFIG"] = "example"
 import sys
@@ -166,7 +167,7 @@ class BaseFactor(unittest.TestCase):
 
 class Exclude(Base):
     """E: 15:18 당일 실패는 그 종목만 빠지고 매수, 5% 이상이면 시장 전체 문제로 차단"""
-    CODES = ["990006"] + [f"9{i:05d}" for i in range(39)]                      # 40종목
+    CODES = ["990010"] + [f"9{i:05d}" for i in range(39)]                      # 40종목
 
     def plan_buy(self, missing):
         res = test_codex.Codex.snapshot_ready(self)
@@ -177,8 +178,8 @@ class Exclude(Base):
         Q.snapshot = lambda caller, cs, **k: (raw, snap, {"returned": len(got), "codes": 40, "seconds": 1.0})
         C.sd.universe_codes = lambda: list(self.CODES)
         res.ctx.update(amt20={c: (9e9 if c == "900001" else 1e9) for c in self.CODES})
-        top = pd.DataFrame({"code": ["990006"], "score": [0.9], "raw_close": [33000.0]})
-        out = {"filter": {"filter_ok": True, "prev_kospi_close": 2700.0, "prev_kospi_ma120": 2500.0}, "eligible": pd.DataFrame({"code": ["990006"], "score": [0.9]}),
+        top = pd.DataFrame({"code": ["990010"], "score": [0.9], "raw_close": [33000.0]})
+        out = {"filter": {"filter_ok": True, "prev_kospi_close": 2700.0, "prev_kospi_ma120": 2500.0}, "eligible": pd.DataFrame({"code": ["990010"], "score": [0.9]}),
                "market": {}, "errors": [], "ledgers": {n: {"top3": top, "busy": [], "skipped_busy": [], "ledger_status": []} for n in ("strategy", "full")}}
         saved = E.run_day
         try:
@@ -192,7 +193,7 @@ class Exclude(Base):
 
     def test_one_candidate_missing_buys_others(self):
         res, sent = self.plan_buy(["900001"])                                    # 후보(90억) 하나 스냅샷에 없음 (1/40)
-        self.assertEqual([s[2]["stk_cd"] for s in sent], ["990006"])
+        self.assertEqual([s[2]["stk_cd"] for s in sent], ["990010"])
         self.assertFalse(res.day.s.get("buy_block"))
         self.assertEqual(list(res.day.s["excluded_candidates"]["스냅샷·계산 실패"]), ["900001"])
 
@@ -207,22 +208,22 @@ class Exclude(Base):
         import daily
         prev = pd.Timestamp("2026-10-23")
         snapf = os.path.join(self.tmp, "snap.parquet")
-        pd.DataFrame({"stk_cd": ["990006"], "p_code": ["990006"], "p_open": [1.0], "p_high": [1.0], "p_low": [1.0], "p_close": [1.0],
+        pd.DataFrame({"stk_cd": ["990010"], "p_code": ["990010"], "p_open": [1.0], "p_high": [1.0], "p_low": [1.0], "p_close": [1.0],
                       "p_volume": [1.0], "p_amount": [1.0]}).to_parquet(snapf)
         C.atomic_json(os.path.join(self.tmp, "2026-10-23.json"), {
             "excluded_candidates": {"스냅샷·계산 실패": {"900001": {"kind": "snapshot_missing", "amt20": 9e9}},
                                     "일봉 수집 실패": {"900002": {"kind": "fetch_error", "amt20": 9e9}}},
             "live": {"snap_file": snapf, "index_values": {"kospi": 1.0}, "ledger_before": {"strategy": [], "full": []},
-                     "ledgers": {"strategy": [{"code": "990006"}], "full": [{"code": "990006"}]}}})
+                     "ledgers": {"strategy": [{"code": "990010"}], "full": [{"code": "990010"}]}}})
         res = self.started("07:20:00", live=False)
-        pool = SimpleNamespace(amt20=lambda day: {"990006": 1e9, "900001": 9e9})   # 900002 는 오늘도 적재 안 됨
+        pool = SimpleNamespace(amt20=lambda day: {"990010": 1e9, "900001": 9e9})   # 900002 는 오늘도 적재 안 됨
         a = pd.DataFrame({"timestamp": [prev], "open": [10.0], "high": [11.0], "low": [9.0], "close": [10.5], "volume": [50.0], "amount": [525.0]})
         st = SimpleNamespace(adj={"900001": a}, raw={"900001": a.assign(volume=100.0, factor=1.0)})
         seen = {}
 
         def run_day(pool_, day, rows, *a_, **k):
             seen.update(day=day, rows=rows)
-            e = pd.DataFrame({"code": ["900001", "990006"], "score": [0.95, 0.9]})
+            e = pd.DataFrame({"code": ["900001", "990010"], "score": [0.95, 0.9]})
             return {"eligible": e, "ledgers": {n: {"top3": e} for n in ("strategy", "full")}}
         saved = (daily.Store, E.run_day)
         try:
@@ -236,7 +237,7 @@ class Exclude(Base):
         self.assertEqual((c["900001"]["rank"], c["900001"]["in_top3"]), (1, {"strategy": True, "full": True}))
         self.assertIn("공식 일봉", c["900001"]["row"])
         self.assertEqual(c["900002"]["row"], "오늘도 적재 안 됨 (계산 불가)")
-        self.assertEqual(r["top3_live"], {"strategy": ["990006"], "full": ["990006"]})
+        self.assertEqual(r["top3_live"], {"strategy": ["990010"], "full": ["990010"]})
 
 
 class Probe(Base):
@@ -250,11 +251,11 @@ class Probe(Base):
             if threading.current_thread().name == "base_probe":
                 calls.append(len(codes))
                 gate.wait(10)                                                     # 측정 조회가 오래 걸림
-                raw = pd.DataFrame({"stk_cd": ["990006"], "base_pric": ["33000"], "cur_prc": ["33000"], "pred_pre": ["0"]})
+                raw = pd.DataFrame({"stk_cd": ["990010"], "base_pric": ["33000"], "cur_prc": ["33000"], "pred_pre": ["0"]})
                 return raw, None, {"returned": 1, "codes": 1, "seconds": 9.0}
             return real(caller, codes, **k)
         Q.snapshot = snap
-        C.sd.universe_codes = lambda: ["990006"]
+        C.sd.universe_codes = lambda: ["990010"]
         res = self.started("07:05:00", live=False)
         t0 = time.time()
         res.tick(self.clk())

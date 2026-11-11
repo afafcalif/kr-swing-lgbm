@@ -24,3 +24,6 @@ dist/
 backtest_swing/live/config.json
 SUBPC_MANIFEST.sha256
 *.zip
+
+# sync_public 로컬 허용 목록 (실제 값과 겹치는 숫자가 드러나지 않게 올리지 않음)
+tools/*.local.txt

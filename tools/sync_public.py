@@ -39,18 +39,22 @@ ALLOW = [
         "__init__.py", "backup.py", "bar_timing.py", "common.py", "control.py", "daily.py", "engine.py",
         "features_eod.py", "firstrun.py", "gapfill.py", "make_bundle.py", "measure.py", "model.py", "model_repro.py", "monthly.py", "notify.py", "orders.py",
         "positions.py", "quotes.py", "replay.py", "resident.py", "run_day.py", "settings.py", "speed.py",
-        "state.py", "update.py", "watchdog.py",
+        "state.py", "telecmd.py", "update.py", "watchdog.py",
+        "diag_tests.py",  # 시험 실패 진단 (임시 worktree, 키움·텔레그램 호출 없음). test_diag·test_netguard 가 import
     )),
     # 시험 (가짜 서버·가짜 시계)
     *(LIVE + f for f in (
         "test_broad1.py", "test_broad2.py", "test_broad3.py", "test_broad4.py", "test_broad5.py",
         "test_broad6.py", "test_broad7.py", "test_broad8.py", "test_broad9.py", "test_broad10.py",
         "test_broad11.py", "test_broad12.py",
-        "test_backup.py", "test_basefactor.py", "test_closed.py", "test_codex.py", "test_confirm.py",
+        "test_backup.py", "test_basefactor.py", "test_closed.py", "test_codex.py", "test_confirm.py", "test_csat.py", "test_diag.py",
         "test_failshare.py", "test_fetchfill.py", "test_fix.py", "test_fix11r.py", "test_fix11u.py",
-        "test_fix11uv.py", "test_fix11v.py", "test_intraday.py", "test_memcash.py", "test_mock1.py",
+        "test_fix11uv.py", "test_fix11v.py", "test_fix11w.py", "test_fix11wm.py", "test_fix11wn.py",
+        "test_intraday.py", "test_memcash.py", "test_mock1.py", "test_netguard.py",
         "test_orders.py", "test_rebase.py", "test_safety.py", "test_second.py", "test_snap1520.py", "test_swap.py",
         "test_third.py",
+        # 시험 보호: 시험 중 바깥 네트워크·토큰 차단 (모든 test_*.py 첫 줄이 부름, 자식 프로세스는 sitecustomize)
+        "testguard.py", "testguard_site/sitecustomize.py",
         # 시험용 고정 자료: 과거 일봉(일봉 파일 일부)·KRX 공식 시세 (공개 정보). 보유·주문 종목이면 --held 가림이 바꾼다
         "testdata/rebase_real.json",
     )),
@@ -89,6 +93,27 @@ PUB_ROOT = "D:\\kr-swing-lgbm"
 # 드라이브 바로 아래 원본 저장소 이름 폴더 (서브 PC 예시 경로). 구분자(\ 또는 /)는 그대로 둔다.
 DRIVE_REPO = re.compile(r"\b[A-Z]:([\\/])stock\b")
 
+# 11W M·N 조회 명령 시험(test_fix11wm·test_fix11wn)에 옮긴 실제 보유: 한 종목의 수량·평균가·손절가·그 뒤 현재가, 추세 매도한
+# 종목의 수량, 그날 정산 총자산·D+2. 실제 값은 원본 시험에서 읽고(이 파일에는 적지 않음) 아래 가짜 값으로 바꾼다. 가짜 값은 실제
+# 값과 관계없이 정했고, 시험이 확인하는 % 문구가 그대로 성립하게 골랐다 (평균 41,200 -> 현재 40,550 = -1.6%, 손절가 38,237 까지
+# -5.7%, 현재 40,800 = -1.0%). 못 읽으면 실패 (원본이 바뀐 것을 놓치지 않게). 바꾼 뒤 시험을 돌려 확인할 것.
+HOLD_WM, HOLD_WN = LIVE + "test_fix11wm.py", LIVE + "test_fix11wn.py"
+_C = r'"[0-9A-Z]{6}"'
+HOLD_READ = [  # (파일, 정규식, 이름들)
+    (HOLD_WM, re.compile(r'held\((\d+), (\d+_\d{3}), (\d+_\d{3}), kind="점검용"\),\s+' + _C +
+                         r': held\((\d+), 30_000, 27_000, kind="점검용", trend_sell_next_open=True\)'), ("qa", "avg", "stop", "qb")),
+    (HOLD_WM, re.compile(r"self\.quotes\.update\(\{" + _C + r": (\d+_\d{3})\.0, " + _C + r": 28_050\.0\}\)"), ("cur_q",)),
+    (HOLD_WM, re.compile(r'"cur_price": \{' + _C + r": (\d+_\d{3})\.0, " + _C + r": 28_500\.0\}"), ("cur_s",)),
+    (HOLD_WM, re.compile(r'"d2": 18_000_000\.0, "equity": ([\d_]+)\.0'), ("equity",)),
+    (HOLD_WN, re.compile(r'"cur_price": \{' + _C + r": (\d+_\d{3})\.0, " + _C + r": 9_100\.0"), ("cur_n",)),
+    (HOLD_WN, re.compile(r'"d2": ([\d_]+)\.0, "equity": 17_500_000\.0'), ("d2",)),
+    (HOLD_WN, re.compile(r'"cur_price": \{' + _C + r": (\d+_\d{3})\.0, " + _C + r": 29_000\.0\}"), ("settle",)),
+]
+HOLD_FAKE = {"qa": 24, "qb": 9, "avg": 41_200, "stop": 38_237, "cur_q": 40_550, "cur_s": 40_800, "cur_n": 40_950,
+             "equity": 28_412_350, "d2": 16_543_210, "settle": 39_000}
+_Q = r"(?<![\d_.,:\-])"   # 숫자 앞: 다른 숫자·시각·날짜·음수의 일부가 아님
+_E = r"(?![\d_]|[.,:]\d)"  # 숫자 뒤: 숫자가 이어지지 않음
+
 # (경로, 원본 문자열 또는 정규식, 바꿀 문자열). 원본에 없으면 실패. 순서대로 적용, 모두 바꾼다.
 # 개인 경로는 이 파일에 적지 않는다: --src 폴더 경로와 DRIVE_REPO 는 PATH_REWRITE 파일에서 따로 바꾼다.
 REWRITE = [
@@ -109,6 +134,10 @@ REWRITE = [
     ("backtest_swing/EXEC_SPEC.md", re.compile(r"D\+2 추정예수금 [\d,]+ vs 기대 [\d,]+ \(차이 (\d+), 허용 (\d+)\)"),
      lambda m: f"D+2 추정예수금이 기대값보다 {m.group(1)}원 많음, 허용 {m.group(2)}"),
     ("backtest_swing/EXEC_SPEC.md", re.compile(r" 전일 D\+2 = [\d,]+\."), ""),
+    # 11-09 실측 인용 (11W M): 판 종목·수량·총평가 차이 금액
+    ("backtest_swing/EXEC_SPEC.md",
+     re.compile(r"08:30 추세 매도로 판 [0-9A-Z]{6} \d+주가 /holdings·/pnl 에 남아 MTS 와 총평가 [\d,]+ 차이"),
+     "08:30 추세 매도로 판 종목이 /holdings·/pnl 에 남아 MTS 와 총평가가 그 종목 평가액만큼 차이"),
 ]
 
 # 실제 체결 값 (10-29 현금 대조 시험·명세 인용): 종목 코드를 가려도 날짜 + 가격으로 종목을 알 수 있어 가짜 체결로 바꾼다.
@@ -206,7 +235,8 @@ LONG_TOKEN = re.compile(r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{32,}(?![A-Za-z0-
 DIGIT_RUN = re.compile(r"(?<![0-9A-Za-z_.])\d{8,11}(?![0-9A-Za-z_])")
 PLACEHOLDER_DIGITS = ("1234567890", "0123456789", "9876543210")  # 시험의 가짜 값
 # 검사에 걸리지만 괜찮은 값: 백업 시험의 가짜 .env 값·가짜 계좌번호, 기준가 시험의 공개 시세 거래대금
-KNOWN_OK = {"Zx9FakeValue_abcdefghijklmnopqrstuvwxyz0123", "81234567", "950465597"}
+KNOWN_OK = {"Zx9FakeValue_abcdefghijklmnopqrstuvwxyz0123", "81234567", "950465597",
+            "00000000"}  # test_netguard 가짜 계좌번호
 # 숫자가 많은 공개 자료 (백테스트 결과·시험용 과거 일봉): 숫자·키 모양 규칙을 빼고 본다
 LIGHT_PREFIXES = ("backtest_swing/results/", LIVE + "testdata/")
 CHAT_ID = re.compile(r"(?i)chat[_ ]?id[\"']?\s*[:=]\s*[\"']?-?\d{5,}")
@@ -288,6 +318,8 @@ def scan_text(rel: str, text: str, ctx: dict) -> list[str]:
                 hit(i, m.start(), "local-name")
         for rule, rx in KEY_PATTERNS + PERSONAL_PATHS:
             for m in rx.finditer(line):
+                if rule == "secret-assignment" and m.group(1).lower().startswith("fake-"):
+                    continue  # 시험의 가짜 값 (test_netguard: "fake-app-key-0123456789")
                 hit(i, m.start(), rule)
         for m in LONG_TOKEN.finditer(line):
             s = m.group(0)
@@ -389,6 +421,20 @@ def held_values(dirs: list[str]) -> set[str]:
     return toks
 
 
+# 종목 코드: 숫자 6자리, 또는 KRX 새 코드처럼 끝 두 자리에 영문 대문자 (예 모양 9999A9, 99999A)
+CODE_RE = re.compile(r"\d{4}[0-9A-Z]{2}")
+
+
+def code_rx(codes) -> re.Pattern:
+    """코드 목록을 잡는 정규식 (숫자 코드는 앞뒤 숫자만 아니면, 영문 섞인 코드는 앞뒤 영숫자가 아니면)"""
+    dig = sorted(c for c in codes if c.isdigit())
+    aln = sorted(c for c in codes if not c.isdigit())
+    parts = [r"(?<!\d)(?:" + "|".join(dig) + r")(?!\d)"] if dig else []
+    if aln:
+        parts.append(r"(?<![0-9A-Za-z])(?:" + "|".join(aln) + r")(?![0-9A-Za-z])")
+    return re.compile("|".join(parts))
+
+
 HEX_TOKEN = re.compile(r"(?<![0-9A-Za-z])[0-9a-f]{7,40}(?![0-9A-Za-z])")
 
 
@@ -406,9 +452,18 @@ def mask_commits(stage: Path, src: Path, rels) -> None:
     """비공개 저장소 커밋 해시를 일반 표현으로 (명세·시험 주석의 '<해시> 에서 실패 확인' 같은 인용)"""
     texts = {p: (stage / p).read_bytes().decode("utf-8") for p in rels}
     found = private_commits(src, (m.group(0) for t in texts.values() for m in HEX_TOKEN.finditer(t)))
+    def repl(t, p, m):
+        if m.group(0) not in found:
+            return m.group(0)
+        before, after = t[max(m.start() - 1, 0):m.start()], t[m.end():m.end() + 1]
+        if "_" in before + after:
+            return "prevcommit"  # 이름 안이면 식별자로
+        if p.endswith(".py") and before in "\"'" and before == after:
+            return "HEAD"  # 코드의 문자열 값 (diag_tests --commit 기본값·시험 입력): 경로·git 인자로 쓰여 '<커밋>' 이면 깨짐
+        return "<커밋>"
+
     for p, t in texts.items():
-        t2 = HEX_TOKEN.sub(lambda m: m.group(0) if m.group(0) not in found else (
-            "prevcommit" if "_" in t[max(m.start() - 1, 0):m.start()] + t[m.end():m.end() + 1] else "<커밋>"), t)  # 이름 안이면 식별자로
+        t2 = HEX_TOKEN.sub(lambda m: repl(t, p, m), t)
         if t2 != t:
             (stage / p).write_bytes(t2.encode("utf-8"))
 
@@ -433,7 +488,7 @@ def value_hits(root: Path, rels, toks) -> list[tuple[str, str]]:
     hits = []
     for rel in rels:
         for i, line in enumerate((root / rel).read_bytes().decode("utf-8", errors="replace").splitlines()):
-            if INDEX_BAR_LINE.search(line):
+            if INDEX_BAR_LINE.search(line) or any(rx_ok.search(line) for rx_ok in VALUE_OK_LINES):
                 continue
             hits += [(f"{rel}:{i + 1}:{m.start() + 1}", "held-fill-value") for m in rx.finditer(line)]
     return hits
@@ -441,6 +496,19 @@ def value_hits(root: Path, rels, toks) -> list[tuple[str, str]]:
 
 # 시험의 가짜 업종(지수) 1분봉 응답 줄: 업종 코드 "001"·"101" 의 (체결 시각 14자리, 지수 x 100) 쌍이라 종목 체결가와 무관
 INDEX_BAR_LINE = re.compile(r'"(?:001|101)": \[\("\d{14}", "[+-]?\d+"\)')
+
+# 실제 체결 값과 우연히 같은 숫자가 든 줄의 허용 목록 (정규식, 한 줄에 하나, # 은 주석). 어떤 숫자가 실제 값과 겹치는지가 드러나지
+# 않게 저장소 밖 로컬 파일(.gitignore)에 둔다. 줄 전체가 그 문구를 담을 때만 held-fill-value 를 건너뛴다. 실제 보유를 옮긴 값은
+# 허용 목록에 넣지 말고 가짜 값으로 바꿀 것 (HOLD_READ·FILL_TEMPLATES).
+VALUE_OK_FILE = DST / "tools" / "sync_public.local.txt"
+VALUE_OK_LINES: list[re.Pattern] = []
+
+
+def load_value_ok(path: Path) -> list[re.Pattern]:
+    if not path.is_file():
+        return []
+    rows = path.read_text(encoding="utf-8").splitlines()
+    return [re.compile(x) for x in rows if x.strip() and not x.lstrip().startswith("#")]
 
 
 def held_codes(dirs: list[str]) -> set[str]:
@@ -469,7 +537,7 @@ def held_codes(dirs: list[str]) -> set[str]:
         # 그날 로그의 장부 (지금 장부에는 없는 지난 보유도)
         for f in [*d.glob("20??-??-??.json"), *d.glob("*/20??-??-??.json")]:
             walk(json.loads(f.read_text(encoding="utf-8")).get("ledger_before") or {})
-    return {c for c in codes if re.fullmatch(r"\d{6}", c)}
+    return {c for c in codes if CODE_RE.fullmatch(c)}
 
 
 def mask_codes(stage: Path, held: set[str]) -> tuple[dict[str, str], list[str]]:
@@ -482,7 +550,9 @@ def mask_codes(stage: Path, held: set[str]) -> tuple[dict[str, str], list[str]]:
     present = set()
     for p in ALLOW:
         if is_text(p):
-            present.update(re.findall(r"(?<!\d)\d{6}(?!\d)", (stage / p).read_bytes().decode("utf-8")))
+            t = (stage / p).read_bytes().decode("utf-8")
+            present.update(re.findall(r"(?<!\d)\d{6}(?!\d)", t))
+            present.update(re.findall(r"(?<![0-9A-Za-z])\d{4}[0-9A-Z]{2}(?![0-9A-Za-z])", t))
     codes += sorted((held & present) - set(codes))
     return {c: str(MASK_BASE + i) for i, c in enumerate(codes)}, errs
 
@@ -554,9 +624,48 @@ def replace_fills(stage: Path) -> tuple[list[str], list[str]]:
     return errs, sorted({real[k] for k in keys} | {f"{real['q_s']}주", real["actual_u"], real["prev_u"]})
 
 
+def replace_hold(stage: Path) -> tuple[list[str], list[str]]:
+    """조회 명령 시험의 실제 보유 값을 가짜로 (HOLD_READ). 반환 (오류, 원본 값 문구들 = 남았는지 검사할 값)"""
+    texts = {p: (stage / p).read_bytes().decode("utf-8") for p in (HOLD_WM, HOLD_WN)}
+    real, errs = {}, []
+    for p, rx, names in HOLD_READ:
+        m = rx.search(texts[p])
+        if not m:
+            errs.append(f"{p}: 실제 보유 값을 원본에서 못 읽음 (HOLD_READ 확인)")
+            continue
+        real.update({k: int(v.replace("_", "")) for k, v in zip(names, m.groups())})
+    if errs:
+        return errs, []
+    fake = HOLD_FAKE
+    # 1) 정산 현재가: 그 사전·'정산 N' 문구 안에서만 (같은 숫자가 다른 종목의 가짜 손절가로도 쓰임)
+    t = texts[HOLD_WN]
+    rx = re.compile(r'(\{"[0-9A-Z]{6}": )' + f"{real['settle']:_}" + r'(\.0, "[0-9A-Z]{6}": 29_000\.0\})')
+    t, n1 = rx.subn(lambda m: m.group(1) + f"{fake['settle']:_}" + m.group(2), t)
+    t, n2 = re.subn(r"(정산 )" + re.escape(f"{real['settle']:,}") + _E, lambda m: m.group(1) + f"{fake['settle']:,}", t)
+    texts[HOLD_WN] = t
+    if not (n1 and n2):
+        errs.append(f"{HOLD_WN}: 정산 현재가 바꿀 곳 없음 (replace_hold 확인)")
+    # 2) 금액·가격 (밑줄·쉼표 두 모양), 3) 수량
+    money = ("equity", "d2", "avg", "stop", "cur_q", "cur_s", "cur_n")
+    end = r"(?![\d_]|,\d)"  # 금액 뒤: 실수 표기 .0 은 허용
+    subs = [(k, re.compile(_Q + re.escape(fmt.format(real[k])) + end), fmt.format(fake[k])) for k in money for fmt in ("{:_}", "{:,}")]
+    subs += [(k, re.compile(_Q + str(real[k]) + _E), str(fake[k])) for k in ("qa", "qb")]
+    total = dict.fromkeys(money + ("qa", "qb"), 0)
+    for p in texts:
+        for k, rx, new in subs:
+            texts[p], n = rx.subn(new, texts[p])
+            total[k] += n
+    errs += [f"{HOLD_WM}·{HOLD_WN}: 실제 보유 값 '{k}' 바꿀 곳 없음 (replace_hold 확인)" for k, n in total.items() if not n]
+    for p, t in texts.items():
+        (stage / p).write_bytes(t.encode("utf-8"))
+    # 남았는지 검사할 값 (정산 현재가는 같은 숫자가 다른 종목의 가짜 손절가로도 쓰여 빼고, 위에서 바꾼 곳 수로 확인)
+    toks = {fmt.format(real[k]) for k in money for fmt in ("{:_}", "{:,}")}
+    return errs, sorted(toks | {f"{real['qa']}주", f"{real['qb']}주"})
+
+
 def held_hits(root: Path, rels, held: set[str]) -> list[tuple[str, str]]:
     """보유·주문 종목 코드가 남은 곳 (백테스트 결과 폴더는 예전부터 공개한 결과라 보지 않음)"""
-    rx = re.compile(r"(?<!\d)(?:" + "|".join(sorted(held)) + r")(?!\d)")
+    rx = code_rx(held)
     hits = []
     for rel in rels:
         for i, line in enumerate((root / rel).read_bytes().decode("utf-8", errors="replace").splitlines()):
@@ -597,6 +706,9 @@ def apply_rewrites(stage: Path, src: Path, held: set[str], names: dict[str, str]
         f.write_bytes(t2.encode("utf-8"))
     fill_errs, fill_toks = replace_fills(stage)
     errs += fill_errs
+    hold_errs, hold_toks = replace_hold(stage)
+    errs += hold_errs
+    fill_toks += hold_toks
     src_forms = sorted({str(src), str(src).replace("\\", "/")}, key=len, reverse=True)
     for p in PATH_REWRITE:
         f = stage / p
@@ -611,12 +723,12 @@ def apply_rewrites(stage: Path, src: Path, held: set[str], names: dict[str, str]
         if not n:
             errs.append(f"{p}: 바꿀 경로가 원본에 없음 (PATH_REWRITE 항목 확인)")
         f.write_bytes(t.encode("utf-8"))
-    rx = re.compile(r"(?<!\d)(" + "|".join(masks) + r")(?!\d)") if masks else None
+    rx = code_rx(masks) if masks else None
     for p in ALLOW:
         f = stage / p
         if is_text(p):
             t = f.read_bytes().decode("utf-8")
-            t = rx.sub(lambda m: masks[m.group(1)], t) if rx else t
+            t = rx.sub(lambda m: masks[m.group(0)], t) if rx else t
             f.write_bytes(mask_names(t, names).encode("utf-8"))
     mask_commits(stage, src, [p for p in ALLOW if is_text(p)])
     return errs, fill_toks
@@ -629,7 +741,9 @@ def main() -> int:
     ap.add_argument("--held", action="append", required=True,
                     help="실제 장부·보유·주문 기록 폴더 (logs/exec 또는 그 백업 사본, 여러 번 가능, 읽기만 함). 이 종목 코드는 가림")
     ap.add_argument("--check-only", action="store_true", help="복사하지 않고 이 저장소만 검사")
+    ap.add_argument("--value-ok", default=str(VALUE_OK_FILE), help="우연히 같은 숫자 허용 목록 (로컬 파일, 저장소에 올리지 않음)")
     a = ap.parse_args()
+    VALUE_OK_LINES[:] = load_value_ok(Path(a.value_ok))
     sys.stdout.reconfigure(encoding="utf-8")
     src = Path(a.src).resolve()
     if src == DST:
@@ -688,7 +802,7 @@ def main() -> int:
     hits = [(f, "denied-path") for f in files if denied(f, REPO_DENY_DIRS, REPO_DENY_NAMES)]
     hits += scan_files(DST, files, ctx, light={f for f in files if f.startswith(LIGHT_PREFIXES)})
     # 보유·주문 종목 코드: 실행 쪽 파일과 설명 문서만 (백테스트 코드·결과는 실행 전부터 공개한 것이라 우연히 겹칠 수 있음)
-    held_scope = ("backtest_swing/live/", "kiwoom/", "backtest_swing/EXEC_SPEC.md", "README.md", "docs/")
+    held_scope = ("backtest_swing/live/", "kiwoom/", "backtest_swing/EXEC_SPEC.md", "README.md", "docs/", "tools/")  # tools/: 이 파일에 실제 값을 적지 않았는지
     scoped = [f for f in files if f.startswith(held_scope) and is_text(f)]
     hits += held_hits(DST, scoped, held)
     hits += value_hits(DST, [f for f in scoped if not f.startswith(LIGHT_PREFIXES)], held_vals)

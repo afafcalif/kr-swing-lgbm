@@ -4,6 +4,7 @@
 
   python -m unittest backtest_swing/live/test_broad11.py -v
 """
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import testguard; testguard.install()  # noqa: E401,E402,E702  (첫 줄 유지)
 import os  # noqa: E402
 os.environ["LIVE_CONFIG"] = "example"  # 11K 보완 8: 시험은 로컬 config.json 을 읽지 않음 (config.example.json 만)
 import json
@@ -23,7 +24,7 @@ import orders as O  # noqa: E402
 import settings  # noqa: E402
 
 LIMITS = json.load(open(settings.EXAMPLE, encoding="utf-8"))["rate_limits"]
-PLAN3 = [dict(PLAN[0], code=c) for c in ("990001", "990002", "990006")]
+PLAN3 = [dict(PLAN[0], code=c) for c in ("990001", "990002", "990010")]
 
 
 def real_client(fk, clk, token_delay=0.0):

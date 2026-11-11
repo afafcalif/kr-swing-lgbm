@@ -10,6 +10,7 @@
 
   python -m unittest backtest_swing/live/test_snap1520.py -v
 """
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import testguard; testguard.install()  # noqa: E401,E402,E702  (첫 줄 유지)
 import os  # noqa: E402
 os.environ["LIVE_CONFIG"] = "example"  # 11K 보완 8: 시험은 로컬 config.json 을 읽지 않음
 import glob
@@ -34,8 +35,8 @@ import quotes as Q  # noqa: E402
 import settings  # noqa: E402
 import state as S  # noqa: E402
 
-CODES = ["990006", "005930"]
-TOP = pd.DataFrame({"code": ["990006"], "score": [0.9], "raw_close": [33000.0]})
+CODES = ["990010", "005930"]
+TOP = pd.DataFrame({"code": ["990010"], "score": [0.9], "raw_close": [33000.0]})
 OUT = {"filter": {"filter_ok": True, "prev_kospi_close": 2700.0, "prev_kospi_ma120": 2500.0}, "eligible": TOP[["code", "score"]],
        "market": {}, "errors": [], "ledgers": {n: {"top3": TOP, "busy": [], "skipped_busy": [], "ledger_status": []} for n in ("strategy", "full")}}
 HELD = {"qty": 28, "trade_id": "005930-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 60000.0, "stop_basis": "진입일", "kind": "본래",
@@ -139,7 +140,7 @@ class Timeline(Base1520):
         self.tick(res, "15:20:30")
         self.assertEqual(self.bought(), [])                                    # 매수는 15:21 부터
         self.tick(res, "15:21:00")
-        self.assertEqual(self.bought(), ["990006"])
+        self.assertEqual(self.bought(), ["990010"])
         self.assertNotIn("plan_wait", res.day.s)
         for hms in ("15:20:05", "15:22:00", "15:27:00"):
             self.tick(res, hms)
@@ -172,7 +173,7 @@ class Timeline(Base1520):
         self.assertEqual(res.day.s["steps"]["snapshot"]["attempts"], 2)
         self.tick(res, "15:21:03")                                             # 계획 반영 -> 같은 tick 매수
         self.assertTrue(res.day.done("snapshot"))
-        self.assertEqual(self.bought(), ["990006"])
+        self.assertEqual(self.bought(), ["990010"])
         self.assertEqual(res.day.s["steps"]["buy"]["time"], "15:21:03")
 
     def test_snapshot_not_started_before_1521_still_plans_and_buys(self):
@@ -183,7 +184,7 @@ class Timeline(Base1520):
         self.assertEqual(self.calls[1:], [("stop", "15:21:05", False), ("snapshot", "15:21:05"), ("index_bar", "1519", "15:21:05")])
         self.assertEqual(self.bought(), [])
         self.tick(res, "15:21:06")
-        self.assertEqual(self.bought(), ["990006"])
+        self.assertEqual(self.bought(), ["990010"])
 
     def test_plan_never_ready_no_buy(self):
         """5번 모두 실패 -> 그때 매수 안 함 판단, 15:26 뒤 새 시도 없음"""
@@ -260,7 +261,7 @@ class Threaded(Base1520):
         self.gate.set()
         self.settle(res)
         self.tick(res, "15:26:31")                                             # 15:27 전에 완성 -> 바로 매수
-        self.assertEqual(self.bought(), ["990006"])
+        self.assertEqual(self.bought(), ["990010"])
         self.assertNotIn("plan_given_up", res.day.s)
 
     def test_plan_after_1527_discarded_no_buy(self):
@@ -412,7 +413,7 @@ class SpecialDay(Base1520):
         self.tick(res, "16:20:59")
         self.assertEqual(self.bought(), [])
         self.tick(res, "16:21:00")
-        self.assertEqual(self.bought(), ["990006"])
+        self.assertEqual(self.bought(), ["990010"])
         self.R.apply_hours(pd.Timestamp("2026-11-20"))
         self.assertEqual((self.R.T["snapshot"], self.R.index_bar_hhmm()), ("15:20:01", "1519"))
 

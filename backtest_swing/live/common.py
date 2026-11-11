@@ -60,6 +60,14 @@ def apply_universe(day, pointer=None):
     return sd.UNIVERSE
 
 
+def universe_codes_at(path):
+    """11W G1: sd.universe_codes() 와 같은 계산을 주어진 목록 파일로 (전역 sd.UNIVERSE 는 바꾸지 않음: 새 목록 준비 중에도 부모는 옛 목록)"""
+    uni = pd.read_csv(path, dtype={"code": str})
+    codes = set(uni[uni.market.isin(["KOSPI", "KOSDAQ"])].code)
+    have = {f[:-8] for f in os.listdir(sd.RAW_DIR) if f.endswith(".parquet")}
+    return sorted((codes & have) - sd.EXCLUDE)
+
+
 def git_commit() -> str:
     try:
         return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
@@ -432,7 +440,8 @@ class RateGate:
         """다음 빈 시각까지 기다림. 반환: 기다린 초, max_wait 안에 통과할 수 없으면 None (호출한 쪽이 보내지 않음·조회 실패로).
         11L 보완 2 (1): 같은 제한 키는 잠금으로 직렬화 — 키 잠금을 잡은 채로 기다리고, 깬 뒤 마지막 실제 통과 시각을 다시 확인한 다음
         이번 실제 통과 시각을 남기고 푼다 (먼저 잠든 호출이 늦게 깨도 다음 호출이 그 실제 시각부터 간격을 잼). 다른 키는 막지 않음.
-        여러 키를 잡을 때는 정렬한 순서로 (교착 없음). 잠금 대기도 max_wait 안 (실제 시간)"""
+        여러 키를 잡을 때는 정렬한 순서로 (교착 없음). 잠금 대기도 max_wait 안 (실제 시간).
+        11W 대기 상한: 잠금 대기(실제 시간 W 안)와 간격 대기(요청한 잠 합 W 안)는 따로 셈 -> 한 호출 최악 약 2 x max_wait + 수면 초과 (EXEC_SPEC 11W C7)"""
         rs = cls.rules(env, tr)
         if not rs:
             return 0.0

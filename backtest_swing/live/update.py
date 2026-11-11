@@ -29,6 +29,7 @@ from common import LOG_DIR, ROOT, now_kst  # noqa: E402
 import control as K  # noqa: E402
 import notify as N  # noqa: E402
 import state as S  # noqa: E402
+import testguard  # noqa: E402
 
 FREEZE_TAG = "forward-freeze-20261021"
 FROZEN_GLOBS = ["backtest_swing/stage3_*.py", "backtest_swing/stage4_*.py", "backtest_swing/stage5_*.py"]
@@ -97,19 +98,31 @@ def frozen_status():
     return out
 
 
-def run_tests():
-    """backtest_swing/live/test_*.py 전체. 반환 dict(ok, ran, failures, errors, seconds, tail)"""
+def run_tests(out_dir=None, runner=subprocess.run):
+    """backtest_swing/live/test_*.py 전체. 반환 dict(ok, ran, failed, bad, seconds, log). 실패면 전체 출력(traceback 포함)을
+    logs/exec/update_tests_{시각}.txt (UTF-8) 에 남김 (11W: 예전에는 요약만 -> 서브 PC 에서 원인을 못 봄). out_dir·runner 는 시험용"""
     t0 = time.time()
     live = os.path.join(ROOT, "backtest_swing", "live")
-    r = subprocess.run([sys.executable, "-W", "ignore", "-m", "unittest", "discover", "-s", live, "-t", live, "-p", "test_*.py"],
-                       cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800, creationflags=NO_WINDOW,
-                       env={**os.environ, "PYTHONIOENCODING": "utf-8"})
-    txt = r.stdout + r.stderr
+    r = runner([sys.executable, "-W", "ignore", "-m", "unittest", "discover", "-s", live, "-t", live, "-p", "test_*.py"],
+               cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800, creationflags=NO_WINDOW,
+               env={**testguard.test_env(root=ROOT), "PYTHONIOENCODING": "utf-8"})  # 11W: 토큰·키·계좌 비움, .env 안 읽음, 네트워크 막음
+    txt = (r.stdout or "") + (r.stderr or "")
     ran = re.search(r"Ran (\d+) tests?", txt)
     fails = re.search(r"FAILED \((.*?)\)", txt)
     bad = [x for x in txt.splitlines() if x.startswith(("ERROR:", "FAIL:"))]
-    return {"ok": r.returncode == 0 and bool(re.search(r"^OK", txt, re.M)), "ran": int(ran.group(1)) if ran else 0,
-            "failed": fails.group(1) if fails else "", "bad": bad[:5], "seconds": round(time.time() - t0, 1)}
+    ok = r.returncode == 0 and bool(re.search(r"^OK", txt, re.M))
+    log = None
+    if not ok:
+        try:
+            d = out_dir or LOG_DIR
+            os.makedirs(d, exist_ok=True)
+            log = os.path.join(d, f"update_tests_{now_kst():%Y%m%d_%H%M%S}.txt")
+            with open(log, "w", encoding="utf-8") as f:
+                f.write(f"returncode {r.returncode}\n{txt}")
+        except Exception as e:  # noqa: BLE001  (기록 실패는 요약에)
+            log = f"전체 출력 저장 실패 {e!r}"[:200]
+    return {"ok": ok, "ran": int(ran.group(1)) if ran else 0, "failed": fails.group(1) if fails else "", "bad": bad[:5],
+            "seconds": round(time.time() - t0, 1), "log": log}
 
 
 def main(remote, branch):
@@ -172,7 +185,7 @@ def _body(res, old, dirty, remote, branch):
                    f"시험 {tr['ran']}개 통과 ({tr['seconds']}초), 동결 코드 확인 통과")
     else:
         res.update(rc=1, level="ERROR", target=old, msg=f"[코드 갱신 실패] {old[:7]} -> {new[:7]} 시험 실패 ({tr['ran']}개 중 {tr['failed']}: "
-                   f"{'; '.join(tr['bad'])}) - 이전 커밋으로 되돌림")
+                   f"{'; '.join(tr['bad'])}) - 이전 커밋으로 되돌림, 전체 출력 {tr.get('log')}")
 
 
 def _clear_stop_flag():

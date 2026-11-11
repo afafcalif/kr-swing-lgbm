@@ -116,8 +116,8 @@ def snap_rows(snap, raw=None, day=None):
             for r in snap.itertuples() if r.volume > 0 and r.close > 0 and r.open > 0 and r.code not in bad}
 
 
-def prepare(day, ledger_path=None):
-    """장 전: 모델 로드 확인, 일봉 메모리 적재, 장부, 지수"""
+def prepare(day, ledger_path=None, codes=None):
+    """장 전: 모델 로드 확인, 일봉 메모리 적재, 장부, 지수. codes = 적재할 종목 (11W G1: 새 종목 목록 준비, 없으면 지금 목록 sd.universe_codes())"""
     from daily import excluded_codes, index_series
     t0 = time.time()
     mo = day.strftime("%Y-%m")
@@ -139,7 +139,7 @@ def prepare(day, ledger_path=None):
     exp_prev = S.prev_trading_day(day)
     last_date = (upd.get("dates") or [None])[-1]
     t1 = time.time()
-    pool = E.ShardPool(sd.universe_codes(), use_append=True, vdir=vdir)
+    pool = E.ShardPool(codes if codes is not None else sd.universe_codes(), use_append=True, vdir=vdir)
     try:
         lj, lver = ledger_read(ledger_path or LEDGER)  # 읽은 장부 경로·버전 = 쓸 때 경로·확인 버전 (2026-10-24 F-06·F-07)
     except BaseException:

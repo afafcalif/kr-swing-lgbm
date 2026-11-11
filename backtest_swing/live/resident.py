@@ -79,7 +79,8 @@ CAND_AMT = 4_000_000_000
 DISK_WARN_GB, DISK_WARN_PCT = 10, 5  # 11V: 로컬 드라이브 여유가 10GB 또는 5% 아래면 알림 (하루 시작·장후)
 DISK_BLOCK_GB = 2                    # 11V: 2GB 아래면 그날 신규 매수만 막음 (매도·손절은 계속)
 ERROR_REPEAT_MIN = 10                # 11V: 같은 종류 [오류] 알림은 처음 1번 + 10분마다 요약 (그치면 마지막 요약 1번)
-OFFICIAL_FAST_FROM = "08:03:00"  # 11V: 전날 공식 시세 2분 간격 확인 시작 (예전 08:00, 08:00 정각은 KRX 시간 초과가 잦고 시세는 08:10 전후)
+OFFICIAL_FAST_FROM = "08:05:00"  # 11V·11W B4: 전날 공식 시세 다시 확인 첫 시도·2분 간격 시작 (KRX 가 08:00 ~ 08:06 에 매일 느림, 시세는 08:10 전후). 이 앞은 다시 확인 안 함
+BASE_PROBE_KRX = "08:20:00"  # 11W B4: 아침 기준가 측정의 지난 날 KRX 대조 조회는 이 회차에만 (08:00 회차의 KRX 시간 초과 경고 없앰)
 BASE_PROBE = ("07:05:00", "07:30:00", "08:00:00", "08:20:00")  # 11Q F: 아침 기준가 측정 시각 (ka10095 대상 종목, 조회만)
 BASE_PROBE_LATE = 10  # 분: 이보다 늦으면 그 시각은 건너뜀 (재시작 등), 손절 감시 시작(stop_from) 뒤에는 안 함
 BASE_WAIT_ALERT = 3   # 11R C: 보유 종목 기준가를 손절 감시 시작 뒤 이 분 넘게 못 얻으면 알림 (그동안 그 종목 새 손절 감지 멈춤)
@@ -87,7 +88,11 @@ REFETCH = ("08:30:00", "10:00:00", "12:00:00", "14:00:00", "15:00:00")  # 11S C2
 # 11T: 재수집 시작 마감 T["refetch_start_until"](스냅샷 - 510초), 공개 마감 T["refetch_publish_by"](스냅샷 - 330초, 다시 적재가 채택 경계 전에 끝나게, B6)
 MARKET_FAIL_SHARE = 0.05  # 11Q E: 그날 수집·스냅샷 실패 종목이 이 비율(적재 시도 종목 중) 이상이면 시장 전체 문제 = 그날 신규 매수 안 함
 COMMISSION_BY_ENV = {"mock": 0.0035, "prod": 0.00015}  # 11K 11: 매매수수료율 기본값 (config 의 commission 이 있으면 그 값). 키움 모의투자 0.35%, 실전 0.015%
-PROD_COMMISSION = COMMISSION_BY_ENV["prod"]  # Codex 27: 대상 후보 = 전날까지 20일 평균 거래대금 40억 원 이상 (exec_prep_probe 3번과 같은 기준)
+PROD_COMMISSION = COMMISSION_BY_ENV["prod"]
+PNL_SINCE = CFG.get("pnl_since") or "2026-10-26"  # 11W M: 누적 실현손익 시작 (모의 시작)
+CAPITAL_START = float(CFG.get("capital_start") or 30_000_000)  # 11W M: 총손익 기준 시작 금액
+STOP_AUDIT_BP = 10  # 11W (P2-8): 손절 감사 — 손절가보다 이만큼(bp) 넘게 낮게 체결되면 표시
+MANUAL_KEYS = ("qty_review", "base_review", "stop_price", "stop_basis", "stop_temp")  # 11W C3: 15:40 다시 돌 때 사람 수정을 보존하는 항목  # Codex 27: 대상 후보 = 전날까지 20일 평균 거래대금 40억 원 이상 (exec_prep_probe 3번과 같은 기준)
 
 
 class CloseCalcStop(Exception):
@@ -281,11 +286,14 @@ def sb_tax(year):
     return sb.SELL_TAX.get(int(year), 0.002)
 
 
-def pnl_text(p):
-    """요약 알림: 손익과 실전 수수료였다면 손익 (11K 11)"""
-    if not p or p.get("pnl") is None:
-        return ""
-    return f"손익 {p['pnl']:+,.0f} (실전 수수료였다면 {p['pnl_prod_fee']:+,.0f}), "
+def pnl_text(p, rz=None):
+    """요약 알림: 총자산 하루 변화(오늘 거래 수수료 포함)와 실전 수수료였다면 값 (11K 11), 오늘 실현손익 (11W B1: 예전 "손익" 은 총자산 변화였음)"""
+    out = ""
+    if p and p.get("pnl") is not None:
+        out = f"총자산 변화 {p['pnl']:+,.0f} (실전 수수료였다면 {p['pnl_prod_fee']:+,.0f}), "
+    if rz and rz.get("pnl") is not None:
+        out += f"실현손익 {rz['pnl']:+,.0f}" + (f" (진입가 모름 {rz['unknown']})" if rz.get("unknown") else "") + ", "
+    return out
 
 
 def perf_text(p):
@@ -374,6 +382,8 @@ class Resident:
         self.last_nd_minute = None         # 11S D: 다음 날 대조 요약 확인 (1분에 한 번)
         self.prep_thread, self.prep_result, self.prep_ok, self.next_prep_try, self.prep_reason = None, None, False, None, "하루 시작"
         self.prep_lock, self.prep_gen = threading.Lock(), 0  # 11O: 버린 준비(날짜 바뀜·16:30)의 결과는 공개하지 않고 그 묶음을 닫는다
+        # 11W G1: 첫 거래일 월별 갱신으로 바뀐 새 종목 목록 (새 목록 일봉 수집 + 준비가 성공한 묶음과 함께 한 번에 교체, 그 전까지 부모는 옛 목록·옛 묶음)
+        self.uni_pending, self.prep_uni, self.next_uni_try = None, None, None
         self.holidays = S.holidays()
         self.started, self.next_start_try, self.start_reason = False, None, "하루 시작"
         self.tz_block = False
@@ -395,6 +405,8 @@ class Resident:
         self.model_bad = set()          # 하루 시작 모델 검사에 실패한 월 (따라잡기 대상)
         self.auto_monthly = False       # 실제 상주 실행(run)에서만 켬 (시험이 실제 학습 프로세스를 띄우지 않게)
         self.auto_data_jobs = False     # 11S: 장중 재수집·다음 날 대조 요약도 실제 상주 실행(run)에서만 (시험이 저장소 data 를 읽거나 실제 조회하지 않게)
+        # 11W A: 텔레그램 조회 명령용 마지막 손절 감시 값 {quotes: {code: {px, t}}, acct: {t, holdings}} (조회 스레드는 view_lock 안에서 복사만)
+        self.view, self.view_lock, self.bot, self._names = {}, threading.Lock(), None, (None, {})
 
     def now(self):
         return self.clock()
@@ -595,12 +607,31 @@ class Resident:
         held = self.broker.account()["holdings"]
         pos = self.positions()
         prev = S.prev_trading_day(d.date, self.holidays)
+        # 11W K4: 백업으로 되살린 보유의 수량은 그대로 (계좌와의 대조는 그 뒤 아침 복구·장중 규칙·15:40 이 평소 규칙으로, 설명 안 되면 qty_review).
+        # 예전(J): 07:00 백업 복구가 계좌 수량으로 바꾸고 시작 수량 = 계좌 -> 밤사이 설명 안 되는 증가를 흡수
+        bq = {c: int(p.get("qty", 0)) for c, p in pos.get("held", {}).items()} \
+            if (d.s.get("positions_recovery") or {}).get("status") == "recovered_backup" else {}
         pstore = O.IntentStore(os.path.join(CFG["state_dir"], "intents", f"{prev.date()}.json"), clock=self.now)
         today_buys = [i for i in self.om.records if i.get("side") == "buy"]
         temp, unknown = self.fill_missing(pos, {c: h for c, h in held.items() if any(i["code"] == c for i in today_buys)},
                                           str(d.date.date()), today_buys, "보유 장부 복구 (오늘 매수)", drop=False)
         t2, u2 = self.fill_missing(pos, held, str(prev.date()), pstore.items, "보유 장부 복구")
-        P.mark_synced(pos, d.date.date(), self.now().strftime("%H:%M:%S"), "보유 장부 복구 (계좌 수량)")
+        for c, q in bq.items():
+            if c in pos["held"]:
+                pos["held"][c]["qty"] = q
+        # 11W J3·K4: 복구는 시작 수량·반영한 날(qty_synced)을 바꾸지 않음 (백업 것 그대로). 11W K3: 기준이 하나도 없으면(그날 시작 수량 없음, 장부·백업 모두
+        # 손상) 지금 계좌 - 오늘 확정 체결 순합을 그날 시작 수량으로 (체결 조회로 오늘 체결 수량을 먼저 확정, 실패면 아는 만큼) + [수량 기준 없음]
+        hms = self.now().strftime("%H:%M:%S")
+        if not d.s.get("qty_start"):
+            today = str(d.date.date())
+            if any(str(r.get("date") or today) == today and r.get("side") in ("buy", "sell") for r in self.om.records):
+                try:
+                    self.om.refresh_fills()
+                except Exception as e:  # noqa: BLE001  (아는 체결만)
+                    rlog(f"보유 장부 복구: 오늘 체결 조회 실패 -> 아는 체결만 뺌: {e!r}"[:300], "WARN")
+            st = self.final_qty_start(pos, held, {}, today, by="보유 장부 복구 (기준 없음: 계좌 - 오늘 확정 체결)", final=False)
+            alert(f"[수량 기준 없음] 보유 장부·백업이 모두 손상, 그날 시작 수량 없음 -> 계좌 - 오늘 확정 체결을 시작 수량으로: "
+                  f"계좌 { {c: int(h.get('qty', 0)) for c, h in held.items() if int(h.get('qty', 0)) > 0} }, 시작 수량 { {c: x['qty'] for c, x in st.items()} }"[:300])
         save_positions(pos)
         with d.lock:
             d.s["positions_recovery"].update(recovered_at=self.now().strftime("%H:%M:%S"), held=len(pos["held"]), temp_stops=temp + t2,
@@ -657,12 +688,76 @@ class Resident:
             elif not d.s.get("positions_start_skipped"):
                 d.set("positions_start_skipped", {"time": hms, "reason": "그날 첫 시작이 아님" if d.s.get("core_starts") else f"매수 시간창({T['buy_from']}) 이후 처음 시작",
                                                   "basis": "정산 기준 장부(positions_baseline), 없으면 전 거래일 정산 계좌"})
+        self.init_qty_start(pos0)  # 11W J: 그날 시작 수량 (대조 기준) 잠정
         with d.lock:
             d.s.setdefault("core_starts", []).append({"time": self.now().strftime("%H:%M:%S"), "reason": reason, "orders_enabled": self.broker.allow_orders,
                                                       "env": CFG["env"], "code": git_state(), "intents_corrupt": self.om.store.corrupt})
             d.save()
         if self.auto_disk:
             self.disk_check(reason)  # 11V: 하루 시작 (다시 켜질 때도)
+
+    def prev_day_fn(self):
+        return lambda x: S.prev_trading_day(pd.Timestamp(x), self.holidays).date()
+
+    def init_qty_start(self, pos0):
+        """11W J: 그날 시작 수량(qty_start, 그날 상태) = 대조 기준 하나. 잠정 = 하루 처음 읽은 보유 장부 (전 거래일 15:40 확정 또는 그 전 장부:
+        종목마다 장부 수량 book_qty·반영한 날 synced_through). 아침 복구(prev_settle)가 끝나면 그 결과로 확정. 장중에는 어떤 경로도 바꾸지 않음
+        (장중 보유 장부 복구·수동 확인 표시·사람 수정은 매도에 쓰는 운영 수량 positions.qty 만). 이미 있거나 그날 15:40 보유 갱신이 시작됐거나
+        장부를 못 읽었으면(손상·백업 없음) 안 씀 (15:40 은 예전처럼 정산 기준 장부로)"""
+        d = self.day
+        if d.s.get("qty_start") or d.s.get("positions_baseline") or (d.s.get("positions_recovery") or {}).get("status") == "corrupt_unrecovered":
+            return
+        pd_ = self.prev_day_fn()
+        held = {c: {"qty": P.book_qty(p), "through": P.synced_through(pos0, c, pd_)} for c, p in pos0.get("held", {}).items() if P.book_qty(p) > 0}
+        d.set("qty_start", {"time": self.now().strftime("%H:%M:%S"), "by": "하루 시작 장부", "final": False, "held": held})
+
+    def start_base(self, c, pos=None, p=None):
+        """11W J: 확정 시점 대조의 (장부 수량, through). 그날 시작 수량(qty_start)이 있으면 그것 (없는 종목 = 0), 없으면 장부 (book_qty·synced_through)"""
+        qs = self.day.s.get("qty_start")
+        if qs is not None:
+            e = (qs.get("held") or {}).get(c) or {}
+            return int(e.get("qty") or 0), e.get("through")
+        return P.book_qty(p), (P.synced_through(pos, c, self.prev_day_fn()) if pos is not None else None)
+
+    def review_done(self, p):
+        """11W K1: 사람이 수동 확인을 끝냄 = 확인 대상(review_ack: 표시 때 계좌 수량·날짜·시각)이 남았는데 수동 확인 중이 아님 (qty_review 를 지우거나
+        손절가를 고침, <커밋> 와 같은 정책). 예전(J2) review_base 기준은 확인한 수량과 상관없이 계좌를 받았음"""
+        return bool((p or {}).get("review_ack")) and not P.in_review(p)
+
+    def note_review_acks(self, held, where):
+        """11W K1·K2: 사람이 끝낸 수동 확인을 그날 상태 qty_review_ack {종목: {qty: 확인 수량(표시 때 계좌), date, at: 표시 시각, seen, where}} 에 기록
+        (같은 표시는 한 번, 다시 표시·다시 확인하면 새것으로). 15:40 다시 돌 때 기준 장부가 표시 전이어도 이 기록으로 확인을 앎. 반환 그날 기록"""
+        d = self.day
+        acks = d.s.get("qty_review_ack") or {}
+        new = {}
+        for c, p in (held or {}).items():
+            if not self.review_done(p):
+                continue
+            a = p["review_ack"]
+            o = acks.get(c)
+            if o and (o.get("date"), o.get("at")) == (str(a.get("date")), str(a.get("at"))):
+                continue
+            new[c] = {"qty": int(a.get("qty") or 0), "date": str(a.get("date")), "at": str(a.get("at")), "seen": self.now().strftime("%H:%M:%S"), "where": where}
+        if new:
+            with d.lock:
+                d.s.setdefault("qty_review_ack", {}).update(new)
+                d.save()
+            rlog(f"수동 확인 끝남 (확인 수량 기록): {new}"[:300], "INFO")
+        return dict(d.s.get("qty_review_ack") or {})
+
+    def ack_settle(self, c, ack, acct_q, today, stores=None):
+        """11W K1: 사람이 확인한 수량(ack) + 확인 뒤(표시 시각 뒤 만든 의도) 확정 체결 순합 == 계좌 인가 (orders.qty_settle 과 같은 규칙: 미확정 의도가 있으면
+        wait·지난 날만이면 I 범위). 반환 (how, net, opened, det, items)"""
+        th = str((pd.Timestamp(ack["date"]) - pd.Timedelta(days=1)).date())
+        key = (str(ack["date"]), str(ack["at"]))
+        items = [i for i in self.intents_after(th, stores) if (str(i.get("date")), str(i.get("created") or "")) > key]
+        det = {}
+        how, net, opened = O.qty_settle(int(ack["qty"]), int(acct_q), items, c, "", today, det)
+        return how, net, opened, det, items
+
+    def ack_alert(self, c, ack, net, acct_q, where):
+        alert(f"[수동 확인 반영] {c} ({where}) 사람이 {ack['qty']}주로 확인 (표시 {ack['date']} {ack['at']}) + 확인 뒤 확정 체결 {net:+d}주 = 계좌 {acct_q}주 "
+              f"-> 그 수량을 시작 수량으로"[:300])
 
     def token_check(self, tag, until):
         """11J 보완 3 R3: 주문·계좌 클라이언트와 시세 클라이언트의 토큰이 until(그날 시각) + 30분까지 쓸 수 있는지 확인, 아니면 지금 갱신.
@@ -715,16 +810,23 @@ class Resident:
         if self.prep_thread is not None:
             return
         d = self.day
-        need_data = not d.done("data") and (d.status("data") != S.FAILED or d.can_retry("data"))
-        if need_data:
+        # 11W G1: 새 종목 목록이 기다리면 그 목록으로 (후보 준비: 일봉 수집은 옛 목록 + 새 목록 종목 모두, 적재는 새 목록). 그날 data 단계·부모 목록은 그대로
+        target = self.uni_pending or sd.UNIVERSE
+        cand = target != sd.UNIVERSE
+        # 11W G1: 그날 일봉을 다른 목록으로 받았으면(재시작 뒤 하루 시작이 새 목록을 적용 등) 다시 받음
+        other = d.done("data") and (d.s["steps"].get("data") or {}).get("universe") not in (None, target)
+        need_data = cand or other or (not d.done("data") and (d.status("data") != S.FAILED or d.can_retry("data")))
+        if need_data and not cand:
             d.begin("data")
         self.prep_reason = reason
+        self.prep_uni = target
         with self.prep_lock:
             self.prep_gen += 1
             self.prep_result = None
             self.prep_prev_check = not d.s.get("prev_excluded_check")  # 11Q E: 전날 빠진 후보 확인 (하루 한 번, 결과는 주 스레드가 기록)
             self.prep_thread = threading.Thread(target=self._prep_work, args=(d.date, need_data), daemon=True)
             self.prep_thread.prep_gen = self.prep_gen
+            self.prep_thread.uni = target if cand else None
         self.prep_thread.start()
 
     def publish_prep(self, out):
@@ -736,6 +838,18 @@ class Resident:
                 return True
         self.dispose_pool(out.get("pool"), f"버린 준비 결과 (세대 {gen}, 지금 {self.prep_gen})")
         return False
+
+    def reap_prep(self, hms):
+        """11W J6: 준비 스레드가 결과(publish_prep) 없이 끝났으면(예상 못 한 예외) 실패 결과로 회수 -> apply_prep 이 보통 실패처럼 60초 뒤 다시
+        (후보 준비면 adopt_universe 가 옛 목록 그대로·60초 뒤). 예전: prep_thread 가 남아 재시도가 멈춤"""
+        th = self.prep_thread
+        if th is None or self.prep_result is not None or not isinstance(th, threading.Thread) or th.ident is None or th.is_alive():
+            return
+        with self.prep_lock:
+            if self.prep_thread is not th or self.prep_result is not None:
+                return
+            self.prep_result = {"error": "준비 스레드가 결과 없이 끝남", "finished": hms}
+        rlog("준비 스레드가 결과 없이 끝남 -> 실패로 회수", "WARN")
 
     def drop_prep(self, why):
         """11O: 날짜 바뀜·16:30 지남: 돌고 있거나 반영 안 된 준비를 버린다. 반영 안 된 결과의 묶음은 지금 닫고,
@@ -753,10 +867,16 @@ class Resident:
         import daily
         import run_day as R
         out = {"started": self.now().strftime("%H:%M:%S")}
+        uni = getattr(threading.current_thread(), "uni", None)  # 11W G1: 후보 준비의 새 종목 목록 (부모 sd.UNIVERSE 는 옛 목록 그대로)
         try:
+            codes = C.universe_codes_at(uni) if uni else None  # 11W J6: 목록 읽기 실패도 준비 실패 결과로 (예전: try 밖 -> 결과 없이 스레드 끝)
             if need_data:
                 try:
-                    daily.update(check=self.next_day_input(day))
+                    # 11W G1: 후보 준비는 옛 + 새 목록 종목을 함께 받음 (새 데이터 버전이 어느 목록으로도 온전하게)
+                    if codes is None:
+                        daily.update(check=self.next_day_input(day))
+                    else:
+                        daily.update(only=sorted(set(sd.universe_codes()) | set(codes)), check=self.next_day_input(day))
                     out["data"] = {"daily_update": "ok"}
                 except Exception as e:  # noqa: BLE001
                     out["data"] = {"daily_update": "fail", "error": repr(e)[:300]}
@@ -764,7 +884,7 @@ class Resident:
                 out["data"]["attempt"] = self.now().strftime("%H:%M:%S")
             # 11K 보완 3: 공식 일봉 재판단·전날 복구 값은 모델·메모리 적재와 따로, 먼저 (모델이 없거나 적재가 실패해도 08:30 전에 적용되게)
             self.judge_work(day, out)
-            pool, b, cols, index, ledgers, pinfo = R.prepare(day)
+            pool, b, cols, index, ledgers, pinfo = R.prepare(day) if codes is None else R.prepare(day, codes=codes)
             out.update(pool=pool, boosters=b, cols=cols, index=index, ledgers=ledgers, prep=pinfo, frozen=E.frozen_check())
             amt = pool.amt20(day)
             ex = daily.excluded_codes()
@@ -792,28 +912,31 @@ class Resident:
         d, hms = self.day, t.strftime("%H:%M:%S")
         done = d.s.get("base_probe") or {}
         for slot in BASE_PROBE:
-            late = (pd.Timestamp(f"{d.date.date()} {slot}") + pd.Timedelta(minutes=BASE_PROBE_LATE)).strftime("%H:%M:%S")
-            if slot <= hms < min(late, T["stop_from"]) and slot not in done:
+            s = at(slot)  # 11W L: 거래시간 변경일은 개장 지연만큼 함께 밂 (수능일 08:05·08:30·09:00·09:20, 기록 키는 평소 시각)
+            late = (pd.Timestamp(f"{d.date.date()} {s}") + pd.Timedelta(minutes=BASE_PROBE_LATE)).strftime("%H:%M:%S")
+            if s <= hms < min(late, T["stop_from"]) and slot not in done:
                 with d.lock:
-                    d.s.setdefault("base_probe", {})[slot] = {"started": hms}
+                    d.s.setdefault("base_probe", {})[slot] = {"started": hms, **({"at": s} if s != slot else {})}
                     d.save()
-                self.probe_thread = threading.Thread(target=self._base_probe, args=(d.date, slot), daemon=True, name="base_probe")
+                self.probe_thread = threading.Thread(target=self._base_probe, args=(d.date, slot, s), daemon=True, name="base_probe")
                 self.probe_thread.start()
                 return
 
-    def _base_probe(self, day, slot):
-        """스레드: ka10095 로 대상 종목 기준가 등을 logs/exec/base_probe/{날짜}_{HHMM}.parquet 에, 지난 날 측정은 KRX 기준가와 대조 (상태 파일은 안 고침)"""
+    def _base_probe(self, day, slot, at_hms=None):
+        """스레드: ka10095 로 대상 종목 기준가 등을 logs/exec/base_probe/{날짜}_{HHMM}.parquet 에, 지난 날 측정은 KRX 기준가와 대조 (상태 파일은 안 고침).
+        HHMM = 실제 측정 시각 at_hms (거래시간 변경일은 밀린 시각, 평소 = slot)"""
+        at_hms = at_hms or slot
         try:
             pdir = os.path.join(LOG_DIR, "base_probe")
             os.makedirs(pdir, exist_ok=True)
             raw, _, rec = Q.snapshot(Caller("prod", 5), sd.universe_codes())
             keep = [c for c in ("stk_cd", "base_pric", "cur_prc", "pred_pre", "dt", "cntr_tm", "_recv") if c in raw]
-            raw[keep].to_parquet(os.path.join(pdir, f"{pd.Timestamp(day).date()}_{slot[:5].replace(':', '')}.parquet"), index=False)
-            cmp = base_probe_compare(pdir, day)
-            rlog(f"아침 기준가 측정 {slot[:5]}: 응답 {rec.get('returned')} / {rec.get('codes')}, {rec.get('seconds')}초"
+            raw[keep].to_parquet(os.path.join(pdir, f"{pd.Timestamp(day).date()}_{at_hms[:5].replace(':', '')}.parquet"), index=False)
+            cmp = base_probe_compare(pdir, day) if slot == BASE_PROBE_KRX else {}  # 11W B4: KRX 대조는 08:20 회차에만
+            rlog(f"아침 기준가 측정 {at_hms[:5]}: 응답 {rec.get('returned')} / {rec.get('codes')}, {rec.get('seconds')}초"
                  + (f", KRX 대조 {({k: {s_: v_['same_as_krx'] for s_, v_ in v['slots'].items()} for k, v in cmp.items()})}" if cmp else ""))
         except Exception as e:  # noqa: BLE001  (측정만: 실패해도 매매 영향 없음)
-            rlog(f"아침 기준가 측정 오류 ({slot[:5]}): {e!r}"[:300], "WARN")
+            rlog(f"아침 기준가 측정 오류 ({at_hms[:5]}): {e!r}"[:300], "WARN")
 
     # ------------------------------------------------------------ 11S C2: 장중 키움 재수집
 
@@ -873,18 +996,23 @@ class Resident:
             d.s.setdefault("intraday_refetch", {}).setdefault(slot, {}).update({k: r[k] for k in keep if k in r})
             d.save()
         got, failed = r.get("got") or [], r.get("failed") or {}
+        # 11W B5: 앞 시도(앞 회차, 첫 회차는 07:00 일봉 수집)와 같은 실패 종목만 남음 = 원래 데이터가 없는 종목(정리매매·스팩 관리종목 등) -> INFO
+        prev = [v.get("failed") for k, v in sorted((d.s.get("intraday_refetch") or {}).items()) if k < slot and isinstance(v.get("failed"), dict)]
+        same = set(failed) <= set(prev[-1] if prev else (r.get("codes") or []))
+        lv = "INFO" if not failed or same else "WARN"
         if r.get("error"):
             rlog(f"장중 재수집 {slot[:5]} 오류: {r['error']}"[:300], "WARN")
             return
         if not r.get("published"):
-            rlog(f"장중 재수집 {slot[:5]}: 새 버전 없음 ({r.get('reason')}), 남은 실패 {sorted(failed)}"[:300], "WARN" if failed else "INFO")
+            rlog((f"장중 재수집 {slot[:5]}: 새 버전 없음 ({r.get('reason')}), 남은 실패 {sorted(failed)}"
+                  + (" (앞 시도와 같은 종목)" if failed and same else ""))[:300], lv)
             return
         if hms >= T["no_reload_after"]:
             d.err(f"장중 재수집 {slot[:5]} 결과가 {T['no_reload_after']} 뒤 -> 다시 적재 안 함 (B6), 이전 적재 유지")
             return
         # 11S 보완 1: 이중 적재. 새 적재가 끝나 채택될 때까지 기존 적재(묶음·데이터)를 그대로 쓴다 (prep_ok 유지, 주문 계획 스냅샷도 기존 적재로)
         self.request_prep(f"장중 재수집 뒤 다시 적재 ({slot[:5]}: {got})")
-        rlog(f"장중 재수집 {slot[:5]}: 받음 {got}, 남은 실패 {sorted(failed)} -> 새 버전 {r['published']}, 다시 적재"[:300])
+        rlog(f"장중 재수집 {slot[:5]}: 받음 {got}, 남은 실패 {sorted(failed)} -> 새 버전 {r['published']}, 다시 적재"[:300], lv)
         alert((f"[장중 재수집] {slot[:5]} 07:00 일봉 수집 실패 {len(r.get('codes') or [])}종목 중 받음 {got} -> 새 데이터 버전·다시 적재"
                + (f", 남은 실패 {sorted(failed)}" if failed else ""))[:300])
 
@@ -1013,21 +1141,69 @@ class Resident:
         except Exception as e:  # noqa: BLE001  (기록만: 스냅샷의 고정이 다시 막음)
             self.day.err(f"사용 중 데이터 버전 기록 실패: {e!r}"[:300])
 
+    def adopt_universe(self, out, hms):
+        """11W G1: 새 종목 목록 후보 준비 결과 (주 스레드). 새 목록으로 일봉 수집 + 준비가 모두 성공하고 다시 적재 채택 경계(no_reload_after) 안이면
+        부모 sd.UNIVERSE·그날 data 상태를 지금 바꾸고 True (이어서 apply_prep 이 묶음을 바꿔 끼움 = 목록·묶음·data 한 번에). 아니면 만든 묶음을 닫고
+        옛 목록·옛 묶음·data 상태 그대로 (prep_ok 그대로), 60초 뒤 다시 (data_check 까지, 넘으면 tick 이 포기). 옛 묶음이 없으면 보통 준비 실패처럼 60초 뒤"""
+        d, path, info = self.day, self.prep_uni, out.get("data") or {}
+        fin = out.get("finished") or hms
+        why = ("목록 적용 포기 뒤에 끝남" if self.uni_pending != path else f"준비 실패: {out['error']}" if out.get("error") else
+               f"일봉 수집 실패: {info.get('error')}" if info.get("daily_update") != "ok" else
+               f"{T['no_reload_after']} 뒤 또는 스냅샷 뒤에 끝남" if fin >= T["no_reload_after"] or d.status("snapshot") != S.PENDING else None)
+        with d.lock:
+            d.s.setdefault("universe_pending", {"path": path}).setdefault("attempts", []).append(
+                {"time": hms, "reason": self.prep_reason, "ok": why is None, **({"why": why[:300]} if why else {})})
+            d.save()
+        if why is None:
+            old = sd.UNIVERSE
+            sd.UNIVERSE, self.uni_pending = path, None
+            d.mark("data", {**info, "universe": path})
+            d.set("universe", path)
+            with d.lock:
+                d.s["universe_pending"]["applied"] = hms
+                d.save()
+            rlog(f"새 종목 목록 적용: {old} -> {path} (새 목록 일봉 수집·준비 성공, 묶음과 함께 교체)", "INFO")
+            alert(f"[월별 종목 목록 적용] {d.date.date()} {path}: 새 목록으로 일봉 수집·준비 성공 -> 목록·묶음 함께 바꿈")
+            return True
+        if out.get("pool") is not None:
+            self.dispose_pool(out["pool"], f"새 종목 목록 준비 결과 버림 ({why})"[:200])
+        self.next_uni_try = self.now() + pd.Timedelta(seconds=60)
+        if self.pool is None:  # 옛 묶음도 없음 (아침부터 준비 안 됨) -> 보통 준비 실패처럼 60초 뒤 (그때도 새 목록 먼저)
+            self.prep_ok, self.next_prep_try = False, self.next_uni_try
+        rlog(f"새 종목 목록 준비 안 됨 ({why}) -> 옛 목록·옛 묶음 그대로, {T['data_check']} 까지 60초마다 다시: {path}"[:300], "WARN")
+        return False
+
+    def universe_deadline(self, hms):
+        """11W G1: 새 종목 목록이 data_check(15:18:31) 까지 적용 안 됨 -> 그날은 옛 목록·옛 묶음으로 (다음 날 하루 시작이 새 목록)"""
+        if not self.uni_pending or hms < T["data_check"]:
+            return
+        path, self.uni_pending = self.uni_pending, None
+        d = self.day
+        with d.lock:
+            d.s.setdefault("universe_pending", {"path": path})["given_up"] = hms
+            d.save()
+        rlog(f"새 종목 목록 {path} 이 {T['data_check']} 까지 적용 안 됨 -> 오늘은 옛 목록 {sd.UNIVERSE}", "WARN")
+        alert(f"[월별 목록 미적용] {d.date.date()} 새 종목 목록 {path}: 새 목록 일봉 수집·준비가 {T['data_check'][:5]} 까지 안 됨 -> "
+              f"오늘은 옛 목록·옛 묶음으로 운영, 다음 거래일 하루 시작 때 다시"[:300])
+
     def apply_prep(self):
         """준비 스레드 결과를 상태에 반영 (주 스레드)"""
         d = self.day
         out, self.prep_result, self.prep_thread = self.prep_result or {}, None, None
         hms = self.now().strftime("%H:%M:%S")
-        if "data" in out:
+        if self.prep_uni is not None and self.prep_uni != sd.UNIVERSE:  # 11W G1: 새 종목 목록 후보 준비 (성공이면 목록·data 상태를 바꾸고 이어서 채택)
+            if not self.adopt_universe(out, hms):
+                return
+        elif "data" in out:
             info = out["data"]
             if info["daily_update"] == "fail":  # Codex 23: 일봉 반영 실패면 data 단계 FAILED
                 d.finish("data", S.FAILED, info)
                 d.err(f"일봉 반영 실패: {info.get('error')}"[:300])
                 alert(f"[일봉 반영 실패] {info.get('error')}"[:300])
             else:
-                d.mark("data", info)
+                d.mark("data", {**info, "universe": self.prep_uni})  # 11W G1: 그날 일봉을 받은 종목 목록
         if out.get("error"):
-            d.err(f"준비 실패 ({self.prep_reason}): {out['error']} | {out.get('trace', '')}"[:800])
+            d.err(f"준비 실패 ({self.prep_reason}): {out['error']} | {out.get('trace', '')}"[:800], key="prep_fail")  # 11W B2: 다시 적재 실패도 해결 대상
             if self.pool is not None and self.ctx.get("prep"):  # 다시 적재 실패: 이전 적재 유지 (판단은 이전 준비 결과 그대로)
                 self.prep_ok = True
                 alert(f"[다시 적재 실패] 이전 적재 유지: {out['error']}"[:300])
@@ -1035,7 +1211,6 @@ class Resident:
             if out["error"] != getattr(self, "_last_prep_error", None):  # 같은 실패(예: 모델 학습 중 모델 없음)는 알림 한 번
                 alert(f"[준비 실패] 60초 뒤 다시, 신규 매수는 준비될 때까지 안 함: {out['error']}"[:300])
             self._last_prep_error = out["error"]
-            d.tag_last_error("prep_fail")
             self.next_prep_try = self.now() + pd.Timedelta(seconds=60)
             return
         # 11S 보완 1: 다시 적재는 완료 시각이 no_reload_after(11T: 스냅샷 - 30초 = 15:19:31) 전이고 그날 스냅샷 단계가 아직 시작 안 했을 때만 바꿔 끼운다
@@ -1074,12 +1249,17 @@ class Resident:
         if not model_ok:  # 11J: 모델 확인 실패(해시·특징·고정 표본 예측·월·시드 1 ~ 5) -> 그날 신규 매수 안 함 + 알림
             self.model_bad.add(d.date.strftime("%Y-%m"))  # 11K 보완 1: 따라잡기 대상 (첫 거래일 07:00 ~ monthly_deadline 이면 다시 학습)
             alert(f"[모델 확인 실패] 오늘 신규 매수 안 함: { {k: v for k, v in pinfo['model']['check'].items() if k != 'files'} }"[:300])
-        if not (model_ok and up):
+        miss = pinfo["data"].get("official_missing_dates") or (d.s["steps"].get("data") or {}).get("official_missing_dates")
+        if model_ok and not up and miss and hms < T["official_retry_until"] and not d.done("official_given_up"):
+            # 11W B3: 전날 공식 시세는 KRX 가 08시 전후에 올림 = 매일 예상 흐름. 재확인 마감(official_retry_until)까지는 오류 아님 (마감이면 retry_official 이 오류)
+            rlog(f"전날 일봉 반영 False: 공식 시세 아직 없음 {miss} -> {T['official_retry_until']} 까지 공식 시세 다시 확인 (그때까지 신규 매수 안 함)", "INFO")
+        elif not (model_ok and up):
             d.err(f"모델 로드 확인 {model_ok}, 전날 일봉 반영 {up} (달력 직전 거래일 {pinfo['data'].get('expected_prev_trading_day')}, "
                   f"데이터 마지막 날 {pinfo['data'].get('data_last_date')}) -> 그날 신규 매수 안 함 (6장, Codex 23)", key="prep_data")
         else:  # 11I: 앞서 남긴 "전날 일봉 반영 False"·준비 실패 오류가 다시 적재로 풀렸으면 해결로 표시 (요약의 오류 수에서 뺌)
             d.resolve("prep_data", f"{self.prep_reason}: 모델 확인·전날 일봉 반영 True")
             d.resolve("prep_fail", f"{self.prep_reason}: 준비 성공")
+            d.resolve("official_retry", f"{self.prep_reason}: 전날 일봉 반영 True")
         if not frozen_ok:
             d.err(f"동결 함수 해시·치환 확인 실패 -> 그날 신규 매수 안 함 (B7): {out['frozen']}")
             alert(f"[동결 함수 확인 실패] 오늘 신규 매수 안 함: {out['frozen']}"[:300])
@@ -1099,7 +1279,7 @@ class Resident:
         else:
             d.mark("day_start", rec)
         if self.prep_reason.startswith("공식"):
-            alert(f"[공식 시세 반영] {d.date.date()} {self.prep_reason}, 전날 일봉 반영 {up}")
+            alert(f"[공식 시세 반영] {pinfo['data'].get('data_last_date') or pinfo['data'].get('prev_trading_day')} 일봉 {self.prep_reason}, 전날 일봉 반영 {up}")  # 11W B6: 반영된 일봉 날짜
         if out.get("prev_excluded") is not None and not d.s.get("prev_excluded_check"):
             pe = out["prev_excluded"]
             d.set("prev_excluded_check", pe)
@@ -1474,6 +1654,8 @@ class Resident:
             return
         last = pd.Timestamp(f"{d.date.date()} {st.get('attempt', '00:00:00')}")
         hms = self.now().strftime("%H:%M:%S")
+        if hms < at(OFFICIAL_FAST_FROM):  # 11W B4: 첫 시도는 08:05 (그 앞 KRX 는 느리고 공식 시세도 아직 없음)
+            return
         gap = 2 if at(OFFICIAL_FAST_FROM) <= hms < T["trend_sell_from"] else 10  # 11K 3: 공식 시세가 나오는 08:10 전후는 2분마다 (08:30 전에 재판단)
         if self.now() < last + pd.Timedelta(minutes=gap):
             return
@@ -1523,7 +1705,7 @@ class Resident:
                 d.s["official_first_seen"] = d.s.get("official_first_seen") or f"{d.date.date()} {res.get('probed') or hms}"
             d.save()
         if res.get("error"):
-            d.err(f"공식 시세 확인·일봉 다시 반영 실패: {res['error']}")
+            d.err(f"공식 시세 확인·일봉 다시 반영 실패: {res['error']}", key="official_retry")  # 11W B2: 공식 시세가 반영되면 모두 해결로
             return
         if res.get("mode") == "reapply":
             r = res["reapply"]
@@ -1691,7 +1873,7 @@ class Resident:
         return unknown
 
     def mark_qty_review(self, pos, changes, where, prices=None):
-        """11K 보완 3: 체결로 설명되지 않는 보유 수량 변화 (orders.qty_changes) -> 그 종목은 수동 확인 필요 (positions.mark_qty_review).
+        """11K 보완 3: 체결로 설명되지 않는 보유 수량 변화 (11W H: 장중 orders.qty_over, 확정 시점 orders.qty_settle) -> 그 종목은 수동 확인 필요 (positions.mark_qty_review).
         자동 조정 없음: 손절가·진입가 그대로, 그 종목의 자동 손절·추세 매도·신규 매수 멈춤 (다른 종목은 그대로). 알림: 종목·장부 수량·계좌 수량·비율·손절가·현재가.
         pos 는 저장하지 않음. prices 가 없으면 시세 조회 (5초, 실패면 현재가 모름)"""
         out = {}
@@ -1715,6 +1897,24 @@ class Resident:
                   f"손절가 {r['stop'] if r['stop'] is None else round(r['stop'])}, 현재가 {px.get(c, '모름')} — 분할·병합 등 자동 조정 안 함. "
                   f"이 종목 자동 손절·추세 매도·신규 매수 멈춤 (다른 종목은 그대로). positions.json 에서 qty_review 를 지우거나 손절가를 고칠 때까지"[:500])
         return out
+
+    def estimate_alert(self, c, book, acct_q, net, items, opened, where):
+        """11W I: 지난 날 체결 수량을 끝내 모르는 의도로 계좌 기준 맞춤 (범위 안) -> 항상 [수량 추정 확정] 알림·그날 기록 qty_estimated"""
+        why = O.open_desc(items, opened)
+        with self.day.lock:
+            self.day.s.setdefault("qty_estimated", []).append({"code": c, "where": where, "book": int(book), "account": int(acct_q), "net": int(net), "open": list(opened)})
+            self.day.save()
+        alert(f"[수량 추정 확정] {c} ({where}) 체결 수량을 끝내 모르는 지난 날 의도로 계좌 기준: 장부 {book}주 -> 계좌 {acct_q}주 "
+              f"(확정 체결 {net:+d}주, 근거 의도 {why}) — 체결 내역으로 확인 권장"[:500])
+
+    def intents_after(self, through, stores=None):
+        """11W H: 확정 시점 수량 확인에 셀 의도 = through 다음 날 ~ 어제의 의도 파일(stores 에 있는 날은 그것) + 오늘 의도. 읽기만, 최근 45일"""
+        today, out = self.day.date.normalize(), []
+        for x in pd.date_range(pd.Timestamp(through) + pd.Timedelta(days=1), today - pd.Timedelta(days=1))[-45:]:
+            ds = str(x.date())
+            items = stores[ds].items if stores and ds in stores else jload(os.path.join(CFG["state_dir"], "intents", f"{ds}.json"), [])
+            out += [dict(i, date=i.get("date") or ds) for i in (items or []) if isinstance(i, dict)]
+        return out + (list(self.om.records) if self.om is not None else [])
 
     def trend_wait(self, hms):
         """11K 보완 3·보완 2 (3): 08:30 추세 매도는 공식 일봉 재판단이 끝날 때까지 기다린다 (장 시작 동시호가라 늦게 보내도 같은 시가). 08:50 (TREND_WAIT_UNTIL, 계좌 조회가 늦어도 08:59 전에 보낼 여유)
@@ -1743,7 +1943,7 @@ class Resident:
         acct_ok = True
         try:
             held = self.broker.account()["holdings"]
-            ch = O.qty_changes(pos["held"], held, self.om.records, self.om.date())  # 11K 보완 3: 장 전 계좌에서 설명 안 되는 수량 변화 먼저
+            ch = O.qty_over(pos, held, d.date)  # 11K 보완 3·11W H: 장 전 계좌가 장부보다 많은 종목 먼저 (장부는 맞추지 않음)
             if ch:
                 self.mark_qty_review(pos, ch, "08:30 장 전 계좌 대조")
                 save_positions(pos)
@@ -1826,6 +2026,10 @@ class Resident:
         held = self.broker.account()["holdings"]
         pos = self.positions()
         nos = pos["next_open_sells"]
+        ch = O.qty_over(pos, held, self.day.date)  # 11W J1: 다시 보낼 것·새 대상도 08:30 과 같은 검사 (계좌 > 장부면 수동 확인·이번에 안 보냄)
+        if ch:
+            self.mark_qty_review(pos, ch, "추세 매도 다시·새 대상")
+            save_positions(pos)
         O.end_duties(pos, held, self.now())
         closed = O.closed_codes(pos, self.day.date)  # 11N: 오늘 판 종목은 안 보냄
         go = [c for c in codes if c in nos and c not in P.review_codes(pos) and c not in closed]
@@ -1838,7 +2042,7 @@ class Resident:
     def stop_minute(self, detect=True):
         """1분 손절 감시 (11J, 11J 보완 3, 11U 순서, orders.stop_cycle): ① 보유 시세 조회 (STOP_BUDGET 10초, 맨 먼저) -> ② 계좌 조회(429 재시도 없음,
         보유 0 이면 의무 끝) -> ③ 새 손절 감지 (감지 창은 이 감시를 시작한 시각, 새 의무는 주문 전에 positions.json 에 먼저 저장) -> ④ 매도 전송
-        (새 손절 -> 지난 분에 못 보낸 의무 -> 나머지, 계좌 매도 가능 수량으로 시장가, 계좌 조회 실패면 걸린 매도가 없을 때만 보유 파일 수량,
+        (새 손절 -> 지난 분에 못 보낸 의무 -> 나머지, min(계좌 매도 가능 수량, 장부 수량) 시장가 (11W H), 계좌 조회 실패면 걸린 매도가 없을 때만 보유 파일 수량,
         순회 STOP_SEND_BUDGET 20초, 남은 것은 다음 분). 체결 조회는 하지 않는다. HTTP 요청 하나는 STOP_HTTP_TIMEOUT(5초).
         detect False(15:20 뒤 동시호가)면 ①·③ 없이"""
         d = self.day
@@ -1855,6 +2059,7 @@ class Resident:
             qb["bases"] = tb if old is None or tb is None else {**old, **tb}
             return px
         pos = self.positions()
+        self.note_review_acks(pos.get("held"), "장중")  # 11W K1: 사람이 수동 확인을 끝냈으면 확인 수량을 그날 상태에 (기록만)
         if not detect and not pos.get("sell_duty"):
             return {"skipped": "동시호가: 매도 의무 없음"}
 
@@ -1867,6 +2072,10 @@ class Resident:
             r = O.stop_cycle(self.om, self.watch, pos, quote, lambda: self.broker.balance(quick=True), self.now(), self.mismatch_seen,
                              detect=detect, budget=STOP_BUDGET, on_trigger=save_trigger, send_budget=STOP_SEND_BUDGET,
                              before_detect=lambda px: self.base_gate(pos, qb.get("bases", {})))
+        try:
+            self.note_view(r)  # 11W M 보완: 조회용 값 저장 실패가 아래 수량 확인 표시·저장을 건너뛰지 않게 (로그만)
+        except Exception as e:  # noqa: BLE001
+            rlog(f"조회 명령용 값 저장 실패 (매매 영향 없음): {e!r}"[:300], "WARN")
         if r.get("qty_changed"):  # 11K 보완 3: 이번 분 매도·새 손절 감지에서 뺀 수량 변화 종목 -> 수동 확인 필요로 저장
             self.mark_qty_review(pos, r["qty_changed"], "장중 손절 감시", r.get("quotes"))
             save_positions(pos)
@@ -1906,6 +2115,159 @@ class Resident:
             self.block_buys("holding_mismatch", f"장중 보유 불일치 {r['mismatch']} / 계좌에 없음 {r['not_in_account']} -> 그날 신규 매수 안 함 (B3)",
                             f"[보유 불일치] 신규 매수 중단: {r['mismatch']} / 계좌에 없음 {r['not_in_account']}")
         return r
+
+    def note_view(self, r):
+        """11W A: 이번 분 손절 감시가 받은 시세·계좌를 조회 명령용으로 남김 (새 조회 없음). 시세는 종목마다 마지막 값과 그 시각"""
+        hms = self.now().strftime("%H:%M:%S")
+        with self.view_lock:
+            day = str(self.day.date.date()) if self.day is not None else str(self.now().date())  # 11W M: 날짜 (지난 날 값은 오늘 보유·시세로 안 씀)
+            q = self.view.setdefault("quotes", {})
+            for c, px in (r.get("quotes") or {}).items():
+                q[c] = {"px": float(px), "t": hms, "d": day}
+            if r.get("acct") is not None:
+                self.view["acct"] = {"t": hms, "d": day, "holdings": {c: dict(h) for c, h in r["acct"].items()}}
+
+    def names(self):
+        """11W A: 종목 이름 (그달 대상 종목 목록 파일, 경로가 바뀔 때만 다시 읽음). 못 읽으면 빈 dict"""
+        path = sd.UNIVERSE
+        if self._names[0] != path:
+            try:
+                u = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
+                self._names = (path, dict(zip(u["code"].str.zfill(6), u["name"])))
+            except Exception:  # noqa: BLE001
+                self._names = (path, {})
+        return self._names[1]
+
+    def query_view(self):
+        """11W A (조회 스레드에서): 조회 명령 글에 쓸 값 복사. 잠금은 복사하는 순간만, 키움 호출 없음, 아무것도 쓰지 않음"""
+        import contextlib
+        t, d, om = self.now(), self.day, self.om
+        day = d.date if d is not None else t.normalize()
+        v = {"now": t.strftime("%Y-%m-%d %H:%M:%S"), "today": str(day.date()), "commission": commission_rate(),
+             "data_version": self.ctx.get("data_version"), "buy_allowed": self.ctx.get("buy_allowed")}
+        if d is not None:
+            with d.lock:
+                v["day"] = json.loads(json.dumps(d.s, default=str))
+        else:  # 11W M 보완: 장 마감 뒤(하루 끝 뒤 재시작 = 그날 상태를 만들지 않음) -> 그날 상태 파일을 읽기만 (15:35 체결 확인·15:40 정산 기록)
+            s_ = jload(os.path.join(CFG["state_dir"], f"{day.date()}.json"), None)
+            if s_:
+                v["day"], v["day_from_file"] = s_, True
+        with self.view_lock:
+            v["view"] = json.loads(json.dumps(self.view, default=str))
+        if om is not None:
+            with getattr(om.store, "lock", None) or contextlib.nullcontext():
+                v["orders"] = [dict(i) for i in om.store.items]
+        else:  # 11W M 보완: 주문 모듈이 없으면 그날 의도 파일을 읽기만
+            items = jload(os.path.join(CFG["state_dir"], "intents", f"{day.date()}.json"), [])
+            v["orders"] = [dict(i) for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+        v["positions"] = jload(POSITIONS, {})
+        v["in_review"] = {c: P.in_review(p) for c, p in (v["positions"].get("held") or {}).items()}
+        v["baseline"] = ((v.get("day") or {}).get("positions_baseline") or {}).get("held") or {}
+        pday = S.prev_trading_day(day, self.holidays)
+        prev = jload(os.path.join(CFG["state_dir"], f"{pday.date()}.json"), {}).get("settlement") or {}
+        v["prev_d2"], v["prev_equity"], v["prev_day"] = prev.get("d2"), prev.get("equity"), str(pday.date())
+        # 11W M: 누적 실현손익 (PNL_SINCE 부터 지난 날 의도·정산 기준 장부), 현재가 대체 (지난 15:40 정산 -> 일봉 마지막 종가), 상주 설정 (/status)
+        v["since"], v["capital"], v["prod_commission"] = PNL_SINCE, CAPITAL_START, PROD_COMMISSION
+        try:
+            v["past"] = self.past_days(day)
+        except Exception as e:  # noqa: BLE001
+            v["past"], v["past_error"] = [], repr(e)[:200]
+        try:
+            v["fallback_px"] = self.fallback_prices(v, day)
+        except Exception as e:  # noqa: BLE001
+            v["fallback_px"], v["fallback_error"] = {}, repr(e)[:200]
+        v["proc"] = self.proc_info()
+        try:
+            with open(CFG["heartbeat_file"], "rb") as f:
+                f.seek(0, 2)
+                f.seek(max(0, f.tell() - 300))
+                v["heartbeat"] = f.read().decode("utf-8", "ignore").strip().splitlines()[-1]
+        except Exception:  # noqa: BLE001
+            v["heartbeat"] = None
+        v["names"] = self.names()
+        return v
+
+    def past_days(self, day):
+        """11W M: PNL_SINCE ~ 전 거래일 각 날의 {day, records(체결된 매수·매도 의도), baseline(정산 기준 장부 held), cur_price, settle_time}.
+        파일(그날 상태·의도)이 바뀌지 않았으면 앞서 읽은 값 (지난 날 파일은 보통 안 바뀜)"""
+        out, d = [], pd.Timestamp(PNL_SINCE).normalize()
+        cache = self.__dict__.setdefault("_past_cache", {})
+        while d < pd.Timestamp(day).normalize():
+            if S.is_trading_day(d, self.holidays):
+                ds = str(d.date())
+                sp, ip = os.path.join(CFG["state_dir"], f"{ds}.json"), os.path.join(CFG["state_dir"], "intents", f"{ds}.json")
+                key = tuple(os.path.getmtime(x) if os.path.exists(x) else None for x in (sp, ip))
+                if ds not in cache or cache[ds][0] != key:
+                    s_ = jload(sp, {}) if key[0] else {}
+                    items = jload(ip, []) if key[1] else []
+                    st = s_.get("settlement") or {}
+                    keep = ("side", "code", "filled_qty", "fill_price", "kind", "stage", "fill_status")
+                    cache[ds] = (key, {"day": ds, "records": [{k: r.get(k) for k in keep} for r in items if isinstance(r, dict)
+                                                               and r.get("side") in ("buy", "sell") and int(r.get("filled_qty") or 0) > 0],
+                                       "baseline": (s_.get("positions_baseline") or {}).get("held") or {},
+                                       "cur_price": st.get("cur_price") or {}, "settle_time": st.get("time")})
+                out.append(cache[ds][1])
+            d += pd.Timedelta(days=1)
+        return out
+
+    def fallback_prices(self, v, day):
+        """11W M: 오늘 시세·계좌·정산 현재가가 없을 때 쓸 값 {code: {px, src}}: 가장 최근 지난 15:40 정산 계좌 현재가 (10거래일 안),
+        없으면 일봉 마지막 종가 (live_append raw.parquet, 실제 상주 실행에서만 = 시험이 저장소 data 를 읽지 않게, last_close_fn 으로 바꿈)"""
+        pos = v.get("positions") or {}
+        acct = ((v.get("view") or {}).get("acct") or {}).get("holdings") or {}
+        codes = set(pos.get("held") or {}) | set(acct) | set(v.get("baseline") or {}) | {r.get("code") for r in v.get("orders") or [] if r.get("code")}
+        out = {}
+        past = {x["day"]: x for x in v.get("past") or []}
+        d = pd.Timestamp(day).normalize()
+        for _ in range(10):
+            d = S.prev_trading_day(d, self.holidays)
+            x = past.get(str(d.date()))
+            cp = (x or {}).get("cur_price")
+            if x is None:
+                st = jload(os.path.join(CFG["state_dir"], f"{d.date()}.json"), {}).get("settlement") or {}
+                cp, x = st.get("cur_price") or {}, {"settle_time": st.get("time")}
+            for c in codes - set(out):
+                if (cp or {}).get(c):
+                    out[c] = {"px": float(cp[c]), "src": f"{str(d.date())[5:]} {str(x.get('settle_time') or '15:40')[:5]} 정산", "day": str(d.date())}
+            if not codes - set(out):
+                break
+        miss = sorted(codes - set(out))
+        fn = getattr(self, "last_close_fn", None) or (self.last_closes if self.auto_data_jobs else None)
+        if miss and fn is not None:
+            for c, (dd, px) in (fn(miss) or {}).items():
+                if px and (c not in out or str(dd) > out[c]["day"]):
+                    out[c] = {"px": float(px), "src": f"일봉 {str(dd)[5:10]} 종가", "day": str(dd)}
+        return out
+
+    def last_closes(self, codes):
+        """일봉 마지막 종가 {code: (날짜, 원주가 종가)} (지금 데이터 버전 raw.parquet)"""
+        import daily
+        r = pd.read_parquet(daily.data_file("raw.parquet", daily.APPEND_DIR), columns=["code", "timestamp", "close"])
+        r = r[r.code.isin(list(codes))]
+        r = r.assign(timestamp=pd.to_datetime(r.timestamp)).sort_values("timestamp").groupby("code").tail(1)
+        return {c: (str(t.date()), float(px)) for c, t, px in zip(r.code, r.timestamp, r.close)}
+
+    def proc_info(self):
+        """11W M: 상주 설정 (/status 가 하루 시작 전·휴장일에도 실제 env·주문·코드를 보이게). 코드 = 상주 시작 때 읽은 값 (시험은 처음 물을 때 한 번)"""
+        if getattr(self, "_proc", None) is None:
+            env = CFG["env"]
+            allow = bool(CFG["orders_enabled"]) and (env == "mock" or bool(CFG["allow_prod_orders"]))
+            note = "실전 주문 허용 안 함 (allow_prod_orders)" if CFG["orders_enabled"] and not allow else ""
+            self._proc = {"env": env, "orders": allow, "orders_note": note, "code": getattr(self, "run_code", None) or git_state(),
+                          "started": getattr(self, "run_started", None) or self.now().strftime("%m-%d %H:%M")}
+        return self._proc
+
+    def start_bot(self):
+        """11W A: 텔레그램 조회 명령 수신 스레드 (.env 토큰·대화방이 있을 때만, 실제 상주 실행 run 에서만)"""
+        token, chat = N._env()
+        if not token or not chat:
+            rlog("텔레그램 조회 명령 끔 (.env 에 TELEGRAM_BOT_TOKEN·TELEGRAM_CHAT_ID 없음)", "INFO")
+            return None
+        import telecmd
+        self.bot = telecmd.Bot(token, chat, self.query_view, rlog, hold=lambda: (at(telecmd.HOLD[0]), at(telecmd.HOLD[1])))
+        self.bot.start()
+        rlog("텔레그램 조회 명령 수신 시작 (/holdings /today /status /pnl /help, 조회만)", "INFO")
+        return self.bot
 
     def note_stale(self, stale, where):
         """11K 4: 오늘 것이 아닌 시세를 데이터 이상으로 집계 (그날 상태 stale_quotes: 종목별 횟수·처음·마지막·이유)"""
@@ -2132,7 +2494,8 @@ class Resident:
 
     def plan_pending(self):
         """11T: 주문 계획 스냅샷이 아직 끝나지 않았고 끝날 수 있다 (계산 스레드가 돌고 있음, 또는 준비 끝·묶음 있음·늦은 시작 아님·다시 시도 남음·
-        새 시도 마감 plan_start_until 전). 참이면 매수 단계는 기다린다 (15:21 에 계획이 없어도 끝나는 대로 매수, plan_deadline 15:27 까지, 15:28 전송 마감 그대로)"""
+        새 시도 마감 plan_start_until 전). 참이면 매수 단계는 기다린다 (15:21 에 계획이 없어도 끝나는 대로 매수, 15:28 전송 마감 그대로). 11W (P2-7): plan_deadline(15:27) 뒤 첫 tick 이
+        끝난 계산을 먼저 반영하므로 15:27 직후 끝난 계획도 채택 (15:28 전 전송분만 매수)"""
         d = self.day
         if d.done("snapshot") or d.done("late_start") or d.s.get("plan_given_up"):
             return False
@@ -2148,7 +2511,8 @@ class Resident:
         주 반복은 그동안 매 분 손절 감지·전송·매도 의무를 그대로 돈다 (예전: 작업 프로세스가 멈추면 계산 대기 180초 동안 손절 재전송이 빠짐).
         - 결과가 나오면 이 tick 에 반영(plan_apply) -> 같은 tick 의 매수 단계가 바로 매수.
         - 시작: snapshot(15:20:01) ~ plan_start_until(15:26) 전, 실패하면 60초 뒤 다시 (최대 5번). 매수 시각 뒤에는 기다릴 수 있을 때만 (plan_pending).
-        - plan_deadline(15:27) 까지 계획이 없으면 그날 매수 없음 + 알림. 그때 돌던 계산은 버림 (끝나면 임시 스냅샷 파일 지움, 장애면 묶음 정리)."""
+        - plan_deadline(15:27) 뒤 tick 에 계산이 아직 돌고 있으면 그날 매수 없음 + 알림, 돌던 계산은 버림 (끝나면 임시 스냅샷 파일 지움, 장애면 묶음 정리).
+          그 tick 전에 끝난 계산은 먼저 반영 = 15:27 직후 완성 계획도 채택, 매수는 15:28 전송 마감 안에서만 (11W P2-7 문구)."""
         d = self.day
         job = self.plan_job
         if job is not None and not job["thread"].is_alive():
@@ -2431,7 +2795,14 @@ class Resident:
                     "fee_tax_kiwoom": sum(r["fee_won"] + r["tax_won"] for r in kc) if fills and len(kc) == len(fills) else None,
                     "basis": f"전일 D+2 추정예수금 + 당일 체결 금액 ± 수수료 {commission_rate() * 100:.3f}% ({CFG['env']}, 10원 미만 절사)·매도세 (원 미만 절사), "
                              f"허용 = 1 + 체결 주문마다 (수량 x 1원 + 12원) (11O)"}
+        if cash.get("fee_tax_kiwoom") is not None:  # 11W C6: 현금 허용치는 저가주 대량 체결 때 커짐 -> 비용만 따로 좁은 허용치로 (수수료율 오류 감지)
+            ftol = P.fee_tolerance(fills, commission_rate(), d.date.year)
+            fdiff = round(cash["fee_tax_kiwoom"] - cash["fee_tax_rule"], 1)
+            cash.update(fee_diff=fdiff, fee_tolerance=ftol, fee_ok=bool(abs(fdiff) <= ftol))
         d.set("cash_check", cash)
+        if cash.get("fee_ok") is False:
+            alert(f"[수수료 차이] 키움 체결 조회 비용 {cash['fee_tax_kiwoom']:,.0f} vs 규칙 계산 {cash['fee_tax_rule']:,.0f} (차이 {cash['fee_diff']:+,.0f}, 허용 {cash['fee_tolerance']:,.0f}, "
+                  f"수수료율 {commission_rate() * 100:.3f}% {CFG['env']}) — 설정 commission 확인")
         if cash.get("ok") is False:
             alert(f"[현금 차이] D+2 추정예수금 {a['d2']:,.0f} vs 기대 {cash['expected']:,.0f} (차이 {cash['cash_diff']:,.0f}, 허용 {cash['tolerance']:,.0f})")
         rec = {"time": self.now().strftime("%H:%M:%S"), "account": acct, "avg_price": {c: h["avg_price"] for c, h in held.items() if h["qty"] > 0},
@@ -2439,6 +2810,7 @@ class Resident:
         # 11K 11: 총자산 = D+2 추정예수금 + 보유 x 계좌 현재가, 손익 = 전 거래일 정산 총자산 대비. "실전 수수료였다면" = 손익 + (이 환경 수수료 - 실전 수수료)
         hp = {c: (int(h["qty"]), float(h.get("cur_price") or h.get("avg_price") or 0)) for c, h in held.items() if h["qty"] > 0}
         rec["equity"] = round(float(a["d2"]) + sum(q * px for q, px in hp.values()), 1)
+        rec["cur_price"] = {c: px for c, (q, px) in hp.items()}  # 11W A: 조회 명령 (/holdings·/pnl) 이 15:40 뒤 쓰는 계좌 현재가
         amt = P.fill_amount(fills)
         rate = commission_rate()
         fee_back = round(amt * (rate - PROD_COMMISSION), 1)
@@ -2447,7 +2819,10 @@ class Resident:
         rec["pnl"] = {"prev_day": pday, "prev_equity": prev_eq, "pnl": pnl, "commission": rate, "fill_amount": round(amt, 1),
                       "fee": round(amt * rate, 1), "fee_prod": round(amt * PROD_COMMISSION, 1), "fee_back": fee_back,
                       "pnl_prod_fee": None if pnl is None else round(pnl + fee_back, 1),
-                      "note": "pnl_prod_fee = 실전 수수료(0.015%)였다면 손익 (수수료 차이를 되돌린 값)" + ("" if prev_eq is not None else ", 전 거래일 총자산 기록 없음")}
+                      "note": "pnl = 총자산 하루 변화 (오늘 거래 수수료 포함, 실현손익 아님 11W B1), pnl_prod_fee = 실전 수수료(0.015%)였다면 그 값 (수수료 차이를 되돌린 값)"
+                              + ("" if prev_eq is not None else ", 전 거래일 총자산 기록 없음")}
+        # 11W B1: 오늘 실현손익 = 판 종목의 진입가 대비 (수수료·세금 포함), 진입가는 15:40 보유 갱신 전 장부 (판 종목이 아직 남아 있음)
+        rec["realized"] = P.realized_pnl(fills, self.positions().get("held", {}), None, rate, d.date.year)
         try:
             rec["strategy_perf"] = self.strategy_perf(rec["equity"], hp)  # 11K 8
         except Exception as e:  # noqa: BLE001
@@ -2501,7 +2876,8 @@ class Resident:
     def ac_positions(self):
         """거래 정보 확정 (Codex 5·6·7·12·25, 확인 리뷰 N2). 15:40 settle 이 계좌 수량을 확정한 뒤, 진입일·손절가·trade_id·분류를 확정한다.
         - 기준: 그날 처음 이 단계를 시작할 때의 보유 장부(positions_baseline). 다시 돌려도 같은 기준에서 다시 계산 (체결이 늦게 들어오면 다시 확정).
-        - 체결 조회(ka10076)를 다시 해서 체결 수량을 채우고, 기준 수량 + 매수 체결 - 매도 체결 = 계좌 수량 인지 확인.
+        - 체결 조회(ka10076)를 다시 해서 체결 수량을 채우고, 기준 수량 + 매수 체결 - 매도 체결 = 계좌 수량 인지 확인 (11W H: 장부에 반영된 마지막 날
+          뒤 확정 체결 순합, 정확히 같을 때만 맞춤·다르면 수동 확인·오늘 미확정이면 기존 거래 장부 수량 그대로, orders.qty_settle).
           체결 조회 실패 또는 설명 안 되는 종목이 있으면 수량은 계좌로 맞추되 그 종목은 미확정(info_pending, 새 종목은 잠정 거래 provisional_new +
           임시 손절가)으로 저장하고 FAILED (장 마감 후 60초마다 계속, 다음 날 아침 전날 복구에서도). 미확정 동안 신규 매수 안 함, 손절은 임시 손절가로.
         - 같은 종목을 청산한 뒤 다시 샀으면 새 거래. 추세 매도 판정은 판정일 > 진입일 일 때만. 모든 보유 종목에 손절가·진입일이 있어야 SUCCEEDED"""
@@ -2516,9 +2892,43 @@ class Resident:
         pos = self.positions()
         if not d.s.get("positions_baseline"):
             d.set("positions_baseline", {"held": copy.deepcopy(pos["held"]), "trade_seq": pos.get("trade_seq", 0),
-                                         "time": self.now().strftime("%H:%M:%S")})
+                                         "time": self.now().strftime("%H:%M:%S"), "qty_synced": copy.deepcopy(pos.get("qty_synced"))})
         base = d.s["positions_baseline"]
+        cur = pos["held"]
         pos["held"], pos["trade_seq"] = copy.deepcopy(base["held"]), base["trade_seq"]
+        # 11W C3: 다시 돌 때 기준 장부로 덮으면 앞 시도 저장 뒤 사람이 지운 qty_review·고친 손절가가 되돌아감 -> 앞 시도 저장 값과 지금 파일이 다른
+        # 항목(15:40 뒤 이 단계 말고는 쓰는 곳 없음 = 사람 수정)은 지금 파일 값으로
+        # 11W E2: 찾은 수정은 그날 상태(ac_manual_keep)에 모아 두고 성공할 때까지 모든 재시도에 다시 씀 (예전: 저장 값과의 차이만 -> 두 번째 재시도에서
+        # 기준 장부 값으로 되돌아감)
+        manual = {}
+        for c, last in (d.s.get("ac_positions_saved") or {}).items():
+            now_p = cur.get(c)
+            if now_p is None:
+                continue
+            for k in MANUAL_KEYS:
+                if now_p.get(k) != last.get(k):
+                    manual.setdefault(c, {})[k] = copy.deepcopy(now_p.get(k))
+        keep = copy.deepcopy(d.s.get("ac_manual_keep") or {})
+        for c, kv in manual.items():
+            keep.setdefault(c, {}).update(kv)
+
+        def apply_keep():
+            for c_, kv in keep.items():
+                b = pos["held"].get(c_)
+                if b is None:
+                    continue
+                for k, v in kv.items():
+                    if v is None:
+                        b.pop(k, None)
+                    else:
+                        b[k] = copy.deepcopy(v)
+        apply_keep()  # 기준 장부에 먼저 (수동 확인 여부 등 아래 판단에 씀)
+        if manual:
+            with d.lock:
+                d.s["ac_manual_keep"] = keep
+                d.s.setdefault("ac_positions_manual", []).append({"time": self.now().strftime("%H:%M:%S"), "kept": manual})
+                d.save()
+            rlog(f"15:40 보유 갱신 다시: 사람이 고친 항목 보존 {manual}"[:300], "INFO")
         old = {c: dict(p) for c, p in pos["held"].items()}
         fills_ok, ferr = True, None
         try:
@@ -2536,15 +2946,58 @@ class Resident:
                 sold[r["code"]] = sold.get(r["code"], 0) + int(r["filled_qty"])
         touched = {r["code"] for r in self.om.records if r.get("date", today) == today and r["side"] in ("buy", "sell")
                    and r["status"] in (O.ACCEPTED, O.UNKNOWN, O.SENDING)}
-        unexplained = {}
+        # 11W H 확정 시점: 종목마다 기준 장부 수량 + 장부에 반영된 마지막 날(through, 기준 장부의 synced_through·qty_synced) 뒤 확정 체결 순합
+        # = 계좌일 때만 맞춤 (orders.qty_settle). 미확정 의도가 있으면 맞추지 않음 (wait: 기존 거래는 장부 수량·through 그대로, 미확정으로 다시),
+        # 다르면(또는 지난 날 미확정) 수동 확인 (둘 다 > 0 일 때, 아니면 미확정). 예전 기준 장부(qty_synced 기록 없음)는 오늘 의도만
+        prev_day = lambda x: S.prev_trading_day(pd.Timestamp(x), self.holidays).date()  # noqa: E731
+        bpos, dflt = {"held": base["held"], "qty_synced": base.get("qty_synced")}, str(prev_day(today))
+        unexplained, waiting, cache, b0s = {}, {}, {}, {}
+        # 11W K1·K2: 사람이 끝낸 수동 확인 = 확인한 수량(표시 때 계좌)에 묶음. 지금 파일(첫 시도에서 생긴 표시를 사람이 끝낸 것 포함)과 기준 장부 모두에서
+        # 그날 상태 qty_review_ack 에 기록, 다시 돌 때도 그 기록으로. 계좌 == 확인 수량 + 확인 뒤 확정 체결 순합 일 때만 받음, 다르면 새 수동 확인
+        self.note_review_acks(cur, "15:40 보유 갱신 (지금 파일)")
+        acks = self.note_review_acks(old, "15:40 보유 갱신")
+        acked = set()
         for c in set(old) | set(acct) | set(buy_q) | set(sold):
-            b0 = int((old.get(c) or {}).get("qty", 0))
-            if b0 + buy_q.get(c, 0) - sold.get(c, 0) != int(acct.get(c, 0)):
-                unexplained[c] = {"before": b0, "buy": buy_q.get(c, 0), "sell": sold.get(c, 0), "account": int(acct.get(c, 0))}
-        # 11K 보완 3: 오늘 그 종목 의도가 하나도 없는데 수량이 다르면(둘 다 > 0) = 체결로 설명 안 되는 변화 -> 수동 확인 (미확정·임시 손절가로 만들지 않음)
-        mine = {r["code"] for r in self.om.records if r.get("date", today) == today and r.get("status") not in (O.NOT_SENT, O.REJECTED)}
+            a_ = int(acct.get(c, 0))
+            if d.s.get("qty_start") is not None:  # 11W J: 대조 기준 = 그날 시작 수량 (장중 경로가 바꾼 장부 수량·반영한 날은 안 씀)
+                b0, th = self.start_base(c)
+                th = th or dflt
+            else:
+                b0, th = P.book_qty(old.get(c)), P.synced_through(bpos, c, prev_day) or dflt
+            b0s[c] = b0
+            ak = acks.get(c)
+            if ak and c in old and not P.in_review(old[c]):
+                how, net, opened, det, its = self.ack_settle(c, ak, a_, today)
+                with d.lock:
+                    d.s["qty_review_ack"][c].update(result={"how": how, "net": net, "account": a_, "time": self.now().strftime("%H:%M:%S")})
+                    d.save()
+                if how in ("sync", "account"):
+                    acked.add(c)
+                    if not ak.get("applied"):
+                        with d.lock:
+                            d.s["qty_review_ack"][c]["applied"] = self.now().strftime("%H:%M:%S")
+                            d.save()
+                        self.ack_alert(c, ak, net, a_, "15:40 보유 갱신")
+                        if how == "account":
+                            self.estimate_alert(c, ak["qty"], a_, net, its, opened, "15:40 보유 갱신 (수동 확인 뒤)")
+                    continue
+                unexplained[c] = {"before": int(ak["qty"]), "buy": buy_q.get(c, 0), "sell": sold.get(c, 0), "account": a_, "net": net, "how": how,
+                                  "through": th, "ack": ak, **({"open": opened} if opened else {})}
+                if how == "wait":
+                    waiting[c] = th
+                continue
+            if th not in cache:
+                cache[th] = self.intents_after(th)
+            how, net, opened = O.qty_settle(b0, a_, cache[th], c, th, today)
+            if how not in ("sync", "account"):  # account = 지난 날 체결 수량 모름 (계좌 기준, 기록만)
+                unexplained[c] = {"before": b0, "buy": buy_q.get(c, 0), "sell": sold.get(c, 0), "account": a_, "net": net, "how": how, "through": th,
+                                  **({"open": opened} if opened else {})}
+            if how == "wait":
+                waiting[c] = th
+            elif how == "account":
+                self.estimate_alert(c, b0, a_, net, cache[th], opened, "15:40 보유 갱신")
         review_new = {c: {"file": u["before"], "account": u["account"]} for c, u in unexplained.items()
-                      if u["before"] > 0 and u["account"] > 0 and c not in mine}
+                      if u["before"] > 0 and u["account"] > 0 and u["how"] == "review"}
         review_all = set(review_new) | {c for c, p in old.items() if P.in_review(p)}
         pending = (set(unexplained) | (touched & (set(acct) | set(old)) if not fills_ok else set())) - review_all
         caller = self.quote_caller()
@@ -2557,7 +3010,7 @@ class Resident:
             if cv:
                 cvs[c] = cv
         j = self.judge(list(acct), d.date, cvs, self.day_bases(list(acct), pos))
-        problems, temp, new_trades = [], [], []
+        problems, temp, new_trades, kept = [], [], [], {}
         if review_new:
             self.mark_qty_review(pos, review_new, "15:40 보유 갱신")
         for c, q in acct.items():
@@ -2566,13 +3019,18 @@ class Resident:
                 pos["held"][c]["qty"], pos["held"][c]["avg_price"] = int(q), avg.get(c, pos["held"][c].get("avg_price"))
                 continue
             if c in pending:
-                # 기준에 없던 종목이거나 (체결로 보아) 청산 뒤 다시 산 종목 = 잠정 새 거래, 그 밖은 기존 거래 정보 유지. 수량은 계좌
+                # 기준에 없던 종목이거나 (체결로 보아) 청산 뒤 다시 산 종목 = 잠정 새 거래 (수량은 계좌), 그 밖은 기존 거래 정보 유지.
+                # 11W H: 기존 거래에 미확정 의도가 있으면(wait) 장부 수량을 맞추지 않음 (그 종목 through 그대로, 다음 확정 시점 = 아침 복구·다시)
                 if not o or (c in bought and sold.get(c, 0) >= int(o.get("qty", 0))):
                     p = P.new_trade(pos, c, today, kind=(bought.get(c) or {}).get("kind", "미확인"), provisional_new=True)
                 else:
                     p = pos["held"][c]
                 p["info_pending"], p["pending_since"] = True, today
-                p["qty"], p["avg_price"] = int(q), avg.get(c, p.get("avg_price"))
+                if c in waiting and not p.get("provisional_new"):
+                    kept[c] = (b0s.get(c, P.book_qty(o)), waiting[c])
+                    p["avg_price"] = avg.get(c, p.get("avg_price"))
+                else:
+                    p["qty"], p["avg_price"] = int(q), avg.get(c, p.get("avg_price"))
                 if not p.get("stop_price") or p.get("provisional_new"):
                     s_, basis = P.temp_stop(c, p.get("avg_price"), today)
                     p.update(stop_price=float(s_), stop_temp=True, stop_basis=basis)
@@ -2612,18 +3070,26 @@ class Resident:
                 problems.append(f"{c} 15:30 1분봉 없음 -> 추세 판정 못 함")
         for c in [c for c in pos["held"] if c not in acct]:
             pos["held"].pop(c)
+        apply_keep()  # 11W G2: 마지막 단계로 한 번 더 — 신규 매수·당일 재매수는 new_trade 가 보유 객체를 새로 만들어 사람 수정이 사라지던 것
         for c in [c for c in pos["next_open_sells"] if c not in acct]:
             pos["next_open_sells"].pop(c)
         self.carry_duties(pos, {c: {"qty": int(q)} for c, q in acct.items()}, "15:40")  # 11J 보완 3: 계좌 보유 0 = 의무 끝, 남으면 다음 날 시가
         pos.pop("closed_today", None)  # 11N: 보유 파일이 계좌로 갱신됐으니 판 종목 표시는 필요 없음
-        P.mark_synced(pos, today, self.now().strftime("%H:%M:%S"), "15:40 보유 갱신")  # 11K 보완 3: 이 저장 뒤로는 오늘 의도가 수량에 반영됨
+        P.mark_synced(pos, today, self.now().strftime("%H:%M:%S"), "15:40 보유 갱신", today)  # 11K 보완 3·11W H: 오늘 의도까지 장부에 반영
+        for c in acked:  # 11W K1: 받은 확인은 끝 (다시 표시되면 새 확인 대상)
+            if c in pos["held"]:
+                pos["held"][c].pop("review_ack", None)
+        for c, (q, th) in kept.items():  # 11W H: 못 맞춘 종목은 장부 수량·반영한 날 그대로 (다음 확정 시점이 오늘 의도도 셈)
+            if c in pos["held"]:
+                pos["held"][c]["qty"], pos["held"][c]["synced_through"] = q, th
         save_positions(pos)
+        d.set("ac_positions_saved", {c: {k: copy.deepcopy(p.get(k)) for k in MANUAL_KEYS} for c, p in pos["held"].items()})  # 11W C3
         if pending:
             first = not d.s.get("positions_unconfirmed") or d.s["positions_unconfirmed"].get("resolved_at")
             d.set("positions_unconfirmed", {"time": self.now().strftime("%H:%M:%S"), "fills_ok": fills_ok, "fills_error": ferr,
                                             "unexplained": unexplained, "codes": sorted(pending), "resolved_at": None})
             if first:
-                alert(f"[거래 정보 미확정] 체결 조회 {'성공' if fills_ok else '실패'}, 설명 안 되는 수량 {unexplained} — 수량은 계좌 기준, "
+                alert(f"[거래 정보 미확정] 체결 조회 {'성공' if fills_ok else '실패'}, 설명 안 되는 수량 {unexplained} — 수량은 계좌 기준 (미확정 의도가 있는 기존 거래는 장부 그대로), "
                       f"{sorted(pending)} 는 임시 손절가, 신규 매수 안 함, 장 마감 후 계속 다시 확인"[:300])
             raise S.StepFailed(f"거래 정보 미확정: 체결 조회 {'성공' if fills_ok else '실패: ' + str(ferr)}, 설명 안 됨 {unexplained}",
                                {"pending": sorted(pending), "unexplained": unexplained})
@@ -2743,6 +3209,17 @@ class Resident:
                 self.retire_close_job("16:30 지남 (그날 적용 못 함)")
             return
         job = self.close_job
+        r0 = (job or {}).get("result") or {}
+        if job is not None and r0.get("finished") and not r0.get("error") and not r0.get("aborted") and d.done("settle") \
+                and (job.get("thread") is None or not job["thread"].is_alive()):
+            # 11W C4: 계산은 끝났고 요약 저장만 늦음 -> 대조 미완료가 아니라 그 결과로 요약 (16:30 뒤라 다시 계산은 안 함)
+            r0["late"] = True
+            S.run_step(d, "ac_summary", self.ac_summary, notify=alert, backoff_s=0, max_attempts=10 ** 6)
+            if d.done("ac_summary"):
+                self.finish_after_close(d)
+                return
+            self.retire_close_job("16:30 지남 (요약 실패)")
+            return
         partial = {k: v for k, v in dict((job or {}).get("out") or {}).items() if k in ("close_1530", "bars_n", "bars_s", "started")}
         if job is not None and job.get("result") and not job["result"].get("error"):
             partial.update({k: v for k, v in job["result"].items() if k in ("close_1530", "rerun_out")})
@@ -2950,6 +3427,7 @@ class Resident:
                     alert(f"[8장 12 (1) 불일치] {n} 장부: 원인을 찾을 때까지 신규 매수 중단 ({BLOCK} 를 지우면 다시 매수)")
                     jdump(BLOCK, {"since": str(d.date.date()), "reason": f"8장 12 (1) 불일치 ({n} 장부)"})
             log["account_watch"] = self.watch.summary()
+            log["stop_audit"] = self.stop_audit()
             jdump(lp, log)
             R.summary(log)
         else:  # 확인 리뷰 16: 스냅샷이 없거나 실패한 날도 summary.csv 한 줄 (매수 안 함, 이유 포함)
@@ -2962,9 +3440,12 @@ class Resident:
             log.setdefault("model", {"month": None, "check": {"ok": False}})
             log.setdefault("git_commit", git_commit())
             bd = d.s.get("buy_decision") or {}
-            why = [x for x in [bd.get("reason")] + self.buy_gate() if x]
-            log["buy_decision"] = {**bd, "new_buy_ok": False, "reason": "; ".join(dict.fromkeys(why)) or "스냅샷 없음",
-                                   "buy_block": list(d.s.get("buy_block") or [])}
+            if bd:  # 11W C4: 그날 매수 때 정한 판단(상태 파일)이 기준 (장후 재시작 뒤 메모리가 비어 '스냅샷 없음'으로 뒤집던 것)
+                log["buy_decision"] = {**bd, "buy_block": list(d.s.get("buy_block") or [])}
+            else:
+                why = [x for x in [bd.get("reason")] + self.buy_gate() if x]
+                log["buy_decision"] = {**bd, "new_buy_ok": False, "reason": "; ".join(dict.fromkeys(why)) or "스냅샷 없음",
+                                       "buy_block": list(d.s.get("buy_block") or [])}
             log["errors"] = list(dict.fromkeys(list(log.get("errors") or []) + list(d.s.get("errors") or [])))
             log["cash_check"] = d.s.get("cash_check")
             log["order_counts"] = {"orders": len([r for r in self.om.records if r.get("ord_no") and r["side"] in ("buy", "sell")]),
@@ -2972,6 +3453,7 @@ class Resident:
             log["holdings_cash_check"] = {"account_holdings": st.get("account"), "deposit": st.get("deposit"), "orderable": st.get("orderable"),
                                           "d2": st.get("d2"), "diff": st.get("diff")}
             log["prev_recovery"], log["account_watch"] = d.s.get("prev_recovery"), self.watch.summary()
+            log["stop_audit"] = self.stop_audit()
             if inc:
                 log["rerun_incomplete"] = inc
             jdump(lp, log)
@@ -2984,12 +3466,24 @@ class Resident:
         line = (f"[{d.date.date()} 요약] 필터 {'통과' if live.get('filter', {}).get('filter_ok') else '미통과'}, "
                 f"{live.get('kind', '-')} 상위 3 {[p['code'] for p in live.get('plan', [])]}, 주문 {n_ord} 체결 {n_fill}, "
                 f"보유 {len(st.get('account') or {})}종목, D+2 예수금 {st.get('d2') or 0:,.0f}, 정산 불일치 {len(st.get('diff') or {})}, "
-                f"{cash}, {pnl_text(st.get('pnl'))}{perf_text(st.get('strategy_perf'))}{'대조 미완료' if inc and not rr else (self.rerun_text(rr) if res is not None else '대조 없음 (스냅샷 없음)')}, "
+                f"{cash}, {pnl_text(st.get('pnl'), st.get('realized'))}{perf_text(st.get('strategy_perf'))}{'대조 미완료' if inc and not rr else (self.rerun_text(rr) if res is not None else '대조 없음 (' + ('장 마감 후 계산 결과 없음' if live.get('snap_file') else '스냅샷 없음') + ')')}, "
                 f"신규 매수 {'가능' if (d.s.get('buy_decision') or {}).get('new_buy_ok') else '안 함'}, "
                 f"오류 {n_err}" + (f" (해결 {n_res})" if n_res else ""))
         alert(line)
         self.close_job = None  # 반영 끝: 작업 참조 회수
         return {"summary": line, "close_calc_s": (cr or {}).get("seconds")}
+
+    def stop_audit(self):
+        """11W (P2-8, 5장): 오늘 체결된 손절마다 처음 본 시각·가격, 손절가, 주문 시각, 체결가, 손절가 대비 차이(bp, 음수 = 손절가보다 낮게 팔림),
+        STOP_AUDIT_BP(10bp) 넘게 낮으면 worse_10bp (기록만, 알림·매매 영향 없음)"""
+        out = []
+        for r in self.om.records if self.om is not None else []:
+            if r.get("stage") != "stop" or not r.get("filled_qty") or not r.get("fill_price") or not r.get("stop_price"):
+                continue
+            bp = (float(r["fill_price"]) / float(r["stop_price"]) - 1) * 1e4
+            out.append({"code": r.get("code"), "first_seen": r.get("first_seen"), "stop_price": r.get("stop_price"), "sent": r.get("time"),
+                        "fill_price": r.get("fill_price"), "filled_qty": r.get("filled_qty"), "diff_bp": round(bp, 1), "worse_10bp": bool(bp < -STOP_AUDIT_BP)})
+        return out
 
     def pending_days(self):
         """확인 리뷰 N1: 마지막으로 정산(after_close)이 SUCCEEDED 된 날 다음부터 어제까지의 모든 거래일 (오래된 순, 최대 30거래일).
@@ -3070,6 +3564,106 @@ class Resident:
                             "clear": "체결 내역으로 확인한 뒤 의도 상태와 이 항목(ambiguous·info_pending)을 사람이 고친다"})
         return t
 
+    def morning_qty(self, pos, held, days, stores, last_ok, dflt):
+        """11W H 확정 시점 (07:00 아침 복구): UNKNOWN 확정·같은 날 여러 UNKNOWN(ambiguous) 정리 뒤, 보유 수량을 계좌로 덮어쓰기 전에 종목마다
+        장부 수량 + 장부에 반영된 마지막 날(synced_through·qty_synced, 기록 없으면 마지막 정산일·볼 날 첫날 앞) 뒤 확정 체결 순합 = 계좌면 맞춤 (fill_missing 이
+        계좌로), 다르면 수동 확인, 오늘 미확정이면 맞추지 않음, 지난 날 체결 수량을 모르는 의도가 남았으면(15:35 전 종료한 날) 예전 복구 규칙대로
+        계좌 기준 (rebuild_pending·fill_missing, 그날 UNKNOWN 은 잔고로 확정, 애매하면 ambiguous). 미확정(ambiguous)·수동 확인 중·장부나 계좌 0 은 밖.
+        반환 (수동 확인 표시, 맞추지 않을 {code: (장부 수량, through)}, 기록)"""
+        today = str(self.day.date.date())
+        ch, kept, cache, rec = {}, {}, {}, {}
+        for c, p in pos["held"].items():
+            a = int((held.get(c) or {}).get("qty", 0))
+            f, th = self.start_base(c, pos, p)  # 11W J: 그날 시작 수량(잠정 = 하루 처음 읽은 장부)이 기준 (장중으로 늦어져도)
+            if p.get("ambiguous") or P.in_review(p) or a <= 0:
+                continue
+            if self.review_done(p):  # 11W K1: 사람이 끝낸 수동 확인 -> 확인 수량 + 확인 뒤 확정 체결 순합 == 계좌 일 때만 받음
+                ak = {"qty": int(p["review_ack"].get("qty") or 0), "date": str(p["review_ack"].get("date")), "at": str(p["review_ack"].get("at"))}
+                how, net, opened, det, its = self.ack_settle(c, ak, a, today, stores)
+                rec[c] = {"how": "ack_" + how, "ack": ak, "net": net, "account": a, **({"open": opened} if opened else {}), **det}
+                if how in ("sync", "account"):
+                    self.ack_alert(c, ak, net, a, "아침 복구")
+                    if how == "account":
+                        self.estimate_alert(c, ak["qty"], a, net, its, opened, "아침 복구 (수동 확인 뒤)")
+                elif how == "review":
+                    ch[c] = {"file": ak["qty"], "account": a}
+                else:
+                    kept[c] = (f, th or dflt)
+                continue
+            if f <= 0:
+                continue
+            th = th or dflt
+            if th not in cache:
+                cache[th] = self.intents_after(th, stores)
+            det = {}
+            how, net, opened = O.qty_settle(f, a, cache[th], c, th, today, det)
+            rec[c] = {"how": how, "book": f, "net": net, "account": a, "through": th, **({"open": opened} if opened else {}), **det}
+            if how == "review":
+                ch[c] = {"file": f, "account": a}
+            elif how == "wait":
+                kept[c] = (f, th)
+            elif how == "account":
+                self.estimate_alert(c, f, a, net, cache[th], opened, "아침 복구")
+        reviews = self.mark_qty_review(pos, ch, "아침 복구") if ch else {}
+        if reviews:
+            save_positions(pos)
+        return reviews, kept, rec
+
+    def defer_unknown(self, pos, held, stores, days, x, it, dflt):
+        """11W J4: 이 UNKNOWN(그날 같은 종목 UNKNOWN 하나)을 잔고로 미리 확정하지 않을까: 수량 계산 대상 종목(장부·계좌 > 0, 미확정·수동 확인 아님)이고
+        이 의도가 장부에 반영된 날 뒤이며, 센 의도 중 같은 종목 다른 매수·매도 의도가 있을 때 (예전: pre_qty 보다 안 줄었으면 NOT_SENT -> 같은 날 확정 매수 28 과 함께
+        장부 28 + 28 != 계좌 28 수동 확인)"""
+        c = it["code"]
+        p = pos["held"].get(c)
+        if not p or p.get("ambiguous") or P.in_review(p) or self.review_done(p) or int((held.get(c) or {}).get("qty", 0)) <= 0:
+            return False
+        f, th = self.start_base(c, pos, p)
+        th = th or dflt
+        if f <= 0 or not str(x) > str(th):
+            return False
+        others = [i for dd in days if str(dd) > str(th) for i in stores[dd].items] + (list(self.om.records) if self.om is not None else [])
+        return any(i is not it and i.get("intent_id") != it.get("intent_id") and i.get("code") == c and i.get("side") in ("buy", "sell")
+                   and i.get("stage") != "cancel" for i in others)
+
+    def settle_deferred(self, deferred, settled, stores, today):
+        """11W J4: 미리 확정하지 않은 UNKNOWN 을 수량 계산 결과와 같게 확정. 계좌 기준(I 범위 안)이고 그 종목 미확정 의도가 이것 하나면 남은 변화가 0 이면 NOT_SENT,
+        아니면 ACCEPTED (est_filled_qty = 남은 변화 크기). 그 밖(수동 확인·대기·미확정 여럿)은 UNKNOWN 그대로 (기록). 반환: 확정한 수"""
+        n = 0
+        for x, it in deferred:
+            r = settled.get(it["code"]) or {}
+            if r.get("how") == "account" and r.get("open") == [it.get("intent_id")]:
+                rest = int(r.get("rest") or 0)
+                moved = rest != 0
+                stores[x].update(it, status=O.ACCEPTED if moved else O.NOT_SENT, checks_due=[], est_filled_qty=abs(rest) if moved else 0,
+                                 cause=f"{today} 아침 복구 수량 계산으로 확정 (장부 {r.get('book')} + 확정 체결 {r.get('net')} -> 계좌 {r.get('account')}, 남은 변화 {rest})",
+                                 matched_by=f"{today} 수량 계산" if moved else None)
+                n += 1
+            else:
+                stores[x].update(it, recovery_note=f"{today} 아침 복구: 같은 종목 다른 의도가 있어 잔고로 미리 확정 안 함, 수량 계산 {r.get('how')} -> UNKNOWN 그대로 (11W J4)")
+        return n
+
+    def final_qty_start(self, pos, held, kept, today, by="아침 복구", final=True):
+        """11W J: 아침 복구가 끝난 보유로 그날 시작 수량 확정. 맞추지 않은 종목(kept) = 장부 수량·반영한 날 그대로, 그 밖 = 계좌 - 오늘 확정 체결 순합
+        (아침 복구가 장중으로 늦어져 계좌에 오늘 체결이 들어 있어도 오늘분은 15:40 에서 한 번만 셈), 반영한 날 = 전 거래일"""
+        net = {}
+        for r in (self.om.records if self.om is not None else []):
+            if str(r.get("date") or today) != today or r.get("side") not in ("buy", "sell") or r.get("status") != O.ACCEPTED:
+                continue
+            f = int(r.get("filled_qty") or 0)
+            net[r["code"]] = net.get(r["code"], 0) + (f if r["side"] == "buy" else -f)
+        prev = str(self.prev_day_fn()(today))
+        out = {}
+        for c in pos["held"]:
+            if c in kept:
+                q, th = kept[c]
+            else:
+                q, th = int((held.get(c) or {}).get("qty", 0)) - net.get(c, 0), prev
+            if int(q) > 0:
+                out[c] = {"qty": int(q), "through": str(th)}
+        self.day.set("qty_start", {"time": self.now().strftime("%H:%M:%S"), "by": by, "final": final, "held": out,
+                                   **({"today_net": net} if net else {})})
+        return out
+
     def rebuild_pending(self, pos, held, days, stores):
         """2차 확인 리뷰 1: 정산 때 거래 정보 미확정(info_pending·provisional_new)으로 남은 보유는 표시만 지우지 않고 그날 의도·체결로 다시 만든다.
         - 그날 시작 보유가 없었거나, 시작 보유를 같은 종목 매도로 전량 판 뒤 다시 샀으면 새 거래 (매수 의도 날짜·분류, 잠정 거래의 번호는 그대로 씀)
@@ -3148,28 +3742,23 @@ class Resident:
         pos = self.positions()
         pend = [c for c, p in pos.get("held", {}).items() if p.get("info_pending") or p.get("provisional_new")]
         corrupt = [x for x in days if stores[x].corrupt]
-        if not inc and not unresolved and not pend and not corrupt:
+        recovered = bool(d.s.get("positions_recovery"))  # 11W K4: 보유 장부를 백업으로 되살린 날은 계좌와 평소 규칙으로 대조
+        if not inc and not unresolved and not pend and not corrupt and not recovered:
             return {"last_settled": last_ok, "checked_days": days, "note": f"복구할 것 없음 (최근 {RECOVERY_LOOKBACK}거래일 UNKNOWN·미확정 없음)"}
         held = self.broker.account()["holdings"]
-        # 11K 보완 4·보완 3: 보유 수량을 계좌로 덮어쓰기(fill_missing·rebuild_pending) 전에, 체결로 설명 안 되는 수량 변화를 찾아 수동 확인으로.
-        # 설명 = 장부 수량을 마지막으로 계좌로 맞춘 날(qty_synced, 15:40 보유 갱신이 저장까지 끝낸 날) 뒤의 의도와 오늘 의도(NOT_SENT·REJECTED 밖).
-        # 15:40 갱신 도중 꺼진 날(기준 장부만 저장)은 맞춘 날이 아니라 그날 매수 의도가 설명으로 남는다. 기록 없는 예전 장부는 마지막 정산일 뒤
-        synced = (pos.get("qty_synced") or {}).get("date") or last_ok
-        since = [x for x in days if synced is None or x > synced]
-        recs = [dict(i, date=today) for x in since for i in stores[x].items if i.get("status") not in (O.NOT_SENT, O.REJECTED)]
-        recs += [i for i in self.om.records if i.get("status") not in (O.NOT_SENT, O.REJECTED)]
-        ch = O.qty_changes({c: p for c, p in pos["held"].items() if not p.get("ambiguous")}, held, recs, today)
-        reviews = self.mark_qty_review(pos, ch, "아침 복구") if ch else {}
-        if reviews:
-            save_positions(pos)
         starts = {}
         groups = {}
         for x, it in unresolved:
             groups.setdefault((x, it["code"]), []).append(it)
-        ambiguous, n_settled = {}, 0
+        ambiguous, n_settled, deferred = {}, 0, []
+        dflt = last_ok or str(self.prev_day_fn()(days[0]))
         for x, it in unresolved:
             c = it["code"]
             g = groups[(x, c)]
+            if len(g) == 1 and self.defer_unknown(pos, held, stores, days, x, it, dflt):
+                # 11W J4: 같은 종목에 다른 의도가 있으면 잔고(pre_qty)로 미리 확정하지 않고 수량 계산(I 범위)에 맡김 -> 결과대로 상태 확정 (아래)
+                deferred.append((x, it))
+                continue
             if len(g) >= 2:  # 3차 확인 리뷰 R1: 같은 날 같은 종목 UNKNOWN 이 둘 이상 -> 잔고 하나로 각각 확정하지 않는다 (체결 조회로 확정될 때까지 미확정)
                 ambiguous.setdefault(c, {"day": x, "intents": [i["intent_id"] for i in g],
                                          "why": f"{x} 같은 종목 UNKNOWN {len(g)}건 ({', '.join(i['stage'] + ' ' + i['side'] for i in g)}) — 잔고 하나로 각각 확정 못 함"})
@@ -3196,12 +3785,22 @@ class Resident:
             buy = next((i for i in groups[(a["day"], c)] if i["side"] == "buy"), {})
             t = self.mark_ambiguous(pos, c, a["day"], held, a["why"], base=self.start_trade(a["day"], c, pos), kind=buy.get("kind"))
             a["held_qty"], a["stop_price"] = int(held.get(c, {}).get("qty", 0)), (t or {}).get("stop_price")
+        self.note_review_acks(pos["held"], "아침 복구")  # 11W K1: 확인 수량 기록
+        reviews, kept, settled = self.morning_qty(pos, held, days, stores, last_ok, dflt)  # 11W H: 덮어쓰기(rebuild_pending·fill_missing) 전에
+        n_settled += self.settle_deferred(deferred, settled, stores, today)
         rebuilt = self.rebuild_pending(pos, held, days, stores)
         ambiguous.update({c: {"day": r["day"], "why": r["how"], "held_qty": int(held.get(c, {}).get("qty", 0)),
                               "stop_price": pos["held"].get(c, {}).get("stop_price")} for c, r in rebuilt.items() if r["how"].startswith("미확정")})
         intents = [dict(i, date=i.get("date") or x) for x in days for i in stores[x].items]
         temp, unknown = self.fill_missing(pos, held, days[-1], intents, f"{days[0]} ~ {days[-1]} 복구")
-        P.mark_synced(pos, today, self.now().strftime("%H:%M:%S"), "아침 복구 (계좌 수량)")
+        P.mark_synced(pos, today, self.now().strftime("%H:%M:%S"), "아침 복구 (계좌 수량)", S.prev_trading_day(d.date, self.holidays).date())
+        for c, (q, th) in kept.items():  # 11W H: 오늘 미확정 의도가 남은 종목은 맞추지 않음 (장부 수량·through 그대로)
+            if c in pos["held"]:
+                pos["held"][c]["qty"], pos["held"][c]["synced_through"] = q, th
+        for c, r in settled.items():  # 11W K1: 받은 확인은 끝
+            if r.get("how") in ("ack_sync", "ack_account") and c in pos["held"]:
+                pos["held"][c].pop("review_ack", None)
+        self.final_qty_start(pos, held, kept, today)  # 11W J: 아침 복구 결과 = 그날 시작 수량
         prev = days[-1]
         trend_unjudged = [c for c, p in pos["held"].items() if p.get("judged_on") != prev and p.get("entry_date") and prev > p["entry_date"]]
         save_positions(pos)
@@ -3216,7 +3815,7 @@ class Resident:
         d.set("prev_recovery", {"prev": prev, "days": inc, "checked_days": days, "last_settled": last_ok, "missed_days": missed,
                                 "time": self.now().strftime("%H:%M:%S"), "settled": n_settled, "rebuilt": rebuilt, "temp_stops": temp,
                                 "unknown_entry": unknown, "trend_unjudged": trend_unjudged, "ledger_stale_days": stale, "intents_corrupt": corrupt,
-                                "ambiguous": ambiguous, "qty_review": reviews, "finalized": False})
+                                "ambiguous": ambiguous, "qty_review": reviews, "qty_settle": settled, "finalized": False})
         for x in inc:
             if x in missed:
                 continue
@@ -3298,6 +3897,7 @@ class Resident:
             self.drop_prep(f"날짜 바뀜 ({t.date()})")
             self.day, self.started, self.next_start_try = d, False, t
             self.pool, self.prep_ok, self.next_prep_try, self.ctx = None, False, t, {}
+            self.uni_pending = None  # 11W G1: 그날 못 바꾼 새 목록은 새 날 하루 시작(start_core 의 apply_universe)이 적용
             self.last_stop_minute = None
         d = self.day
         if d.done("holiday"):
@@ -3353,10 +3953,14 @@ class Resident:
                 except Exception as e:  # noqa: BLE001
                     d.err(f"토큰 갱신 확인 오류: {e!r}")
         # 준비 (스레드): 실패·늦은 시작이어도 아래 손절·매도·정산은 계속 (Codex 4)
+        self.universe_deadline(hms)  # 11W G1: 새 종목 목록 적용 마감 (data_check)
+        self.reap_prep(hms)  # 11W J6: 결과 없이 끝난 준비 스레드 회수
         if self.prep_thread is not None and self.prep_result is not None:
             self.apply_prep()
         elif self.prep_thread is None and not self.prep_ok and t >= (self.next_prep_try or t):
             self.request_prep(self.start_reason if not d.done("day_start") else "준비 다시")
+        elif self.prep_thread is None and self.uni_pending and t >= (self.next_uni_try or t):  # 11W G1: 옛 묶음으로 운영하면서 새 목록 준비
+            self.request_prep(f"새 종목 목록 적용 ({self.uni_pending})")
         if self.recovery_pending() and self.last_recovery_minute != t.strftime("%H:%M"):
             self.last_recovery_minute = t.strftime("%H:%M")
             try:
@@ -3399,7 +4003,8 @@ class Resident:
             step = "data_check"
             S.run_step(d, "data_check", self.data_check, notify=alert)
         # 11T: 주문 계획 스냅샷 15:20:01 (그 분의 손절 감시 뒤). 15:21 매수 시작까지 못 끝났으면(조회 실패 60초 뒤 다시) 15:26 전까지 새로 시작,
-        # 매수는 계획이 끝난 직후부터 (plan_pending 동안 기다림), 15:27 까지 없으면 매수 없음. 11T 보완: 조회·계산은 별도 스레드 (손절 감시 계속)
+        # 매수는 계획이 끝난 직후부터 (plan_pending 동안 기다림), 15:27 뒤 tick 에 계산이 아직 돌면 매수 없음 (그 전에 끝난 계획은 15:28 전송 마감 안에서 채택).
+        # 11T 보완: 조회·계산은 별도 스레드 (손절 감시 계속)
         if T["snapshot"] <= hms and not d.done("snapshot") and not d.done("late_start") and not d.s.get("plan_given_up") \
                 and (hms < T["no_new_order_after"] or self.plan_job is not None):
             step = "snapshot"
@@ -3461,12 +4066,13 @@ class Resident:
             self.finish_after_close(d)
         return step
 
-    def spawn_monthly(self, month, log_path):
-        """monthly.py run {month} 를 창 없이, 낮은 우선순위로 별도 프로세스로 (상주 프로그램이 꺼져도 계속 돎, 장중에 돌아도 본체·손절 감시가 밀리지 않게)"""
+    def spawn_monthly(self, month, log_path, cmd="run"):
+        """monthly.py {cmd} {month} 를 창 없이, 낮은 우선순위로 별도 프로세스로 (상주 프로그램이 꺼져도 계속 돎, 장중에 돌아도 본체·손절 감시가 밀리지 않게).
+        cmd = run (학습·설치·종목 목록) 또는 universe (11W C1: 종목 목록만 다시)"""
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         py = CFG.get("python") or sys.executable
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS) if os.name == "nt" else 0
-        return subprocess.Popen([py, os.path.join(os.path.dirname(os.path.abspath(__file__)), "monthly.py"), "run", month],
+        return subprocess.Popen([py, os.path.join(os.path.dirname(os.path.abspath(__file__)), "monthly.py"), cmd, month],
                                 stdout=open(log_path, "a", encoding="utf-8"), stderr=subprocess.STDOUT, creationflags=flags)
 
     def kill_monthly(self, pid):
@@ -3533,10 +4139,18 @@ class Resident:
             if st["ok"]:
                 self.model_bad.discard(month)
                 if self.day is not None and self.day.date.strftime("%Y-%m") == month:  # 첫 거래일: 새 모델로 다시 적재 -> 그날 매수 가능
-                    self.prep_ok, self.next_prep_try = False, t
-                    self.day.set("monthly_model", {**st, "reload": hms})
+                    # 11W C1·G1: 새 종목 목록은 바로 쓰지 않고 새 목록 일봉 수집 + 준비가 성공한 묶음과 함께 교체 (adopt_universe, data_check 까지)
+                    uni = C.universe_for(self.day.date)
+                    if uni != sd.UNIVERSE:
+                        self.uni_pending, self.next_uni_try = uni, t
+                        self.day.set("universe_pending", {"path": uni, "since": hms, "from": sd.UNIVERSE})
+                    else:
+                        self.prep_ok, self.next_prep_try = False, t
+                    self.day.set("monthly_model", {**st, "reload": hms, "universe": uni})
                 return
         if self.model_ready(month):
+            if self.universe_pending(month):  # 11W C1: 모델은 설치됐는데 종목 목록 갱신 실패 -> 종목 목록만 다시 (최대 2번, 시간창 안에서)
+                self.spawn_universe(month, st, sp, t)
             return
         n = int(st.get(f"attempts_{kind}", 0))
         if n >= 2:
@@ -3555,6 +4169,31 @@ class Resident:
         rlog(f"월별 모델 시작: {month} ({kind} {n + 1}번째, pid {st['pid']}, 로그 {log})", "INFO")
         if kind == "morning":
             alert(f"[월별 모델 따라잡기] {month} 모델 없음·검사 실패 -> 지금 학습 시작 ({hms}, {T['monthly_deadline']} 까지 끝나면 오늘 매수 가능)")
+
+    @staticmethod
+    def universe_pending(month):
+        """11W C1: 그 달 결과가 '모델 설치됨 + 종목 목록 갱신 실패' 인가 (monthly.py universe 로 종목 목록만 다시)"""
+        import monthly as MO
+        r = jload(os.path.join(MO.OUT_DIR, f"{month}.json"), {})
+        st = r.get("steps") or {}
+        return bool(r) and not r.get("ok") and bool((st.get("installed") or {}).get("check_ok")) and not (st.get("universe") or {}).get("ok")
+
+    def spawn_universe(self, month, st, sp, t):
+        """11W C1: 종목 목록만 다시 (별도 프로세스, monthly.py universe). 끝나면 monthly_catchup 이 결과를 알리고 첫 거래일이면 부모에 다시 적용"""
+        n = int(st.get("attempts_universe", 0))
+        if n >= 2:
+            if not st.get("gave_up_universe"):
+                st["gave_up_universe"] = t.strftime("%Y-%m-%d %H:%M:%S")
+                atomic_json(sp, st)
+                alert(f"[월별 종목 목록 실패] {month}: 모델은 설치됨, 종목 목록 갱신 다시 2번 모두 실패 -> 예전 종목 목록 그대로. "
+                      f"수동: python backtest_swing/live/monthly.py universe {month}")
+            return
+        log = os.path.join(LOG_DIR, "monthly", f"{month}.log")
+        self.monthly_proc = self.spawn_monthly(month, log, cmd="universe")
+        st.update(month=month, kind="universe", pid=self.monthly_proc.pid, started_full=t.strftime("%Y-%m-%d %H:%M:%S"), ended=None, ok=None, log=log,
+                  attempts_universe=n + 1)
+        atomic_json(sp, st)
+        rlog(f"월별 종목 목록 다시: {month} ({n + 1}번째, pid {st['pid']})", "WARN")
 
     def monthly_deadline(self, t):
         """11K 보완 1: 첫 거래일 monthly_deadline(11T: 스냅샷 - 1110초 = 15:01:31)에 그 달 모델이 아직 없으면 학습 프로세스를 끄고 그날 신규 매수 안 함 + 알림 (하루 한 번)"""
@@ -3617,13 +4256,14 @@ class Resident:
             alert(f"[상주 프로그램 시작 거부] pid {os.getpid()}: 이미 실행 중 ({why})")
             sys.exit(2)
         atexit.register(self.release_single_instance)
+        self.run_started, self.run_code = self.now().strftime("%m-%d %H:%M"), git_state()  # 11W M: /status 상주 시작 시각·실행 중인 코드
         with open(CFG["pid_file"], "w") as f:
             f.write(str(os.getpid()))
         self.check_tz()
         n_old = N.resend_pending(ALERTS_PENDING, log_path=ALERTS)  # 11J 보완 6·N7: 지난번에 못 보낸 알림 (보낸 번호만 파일에서 지움)
         if n_old:
             rlog(f"지난 미전송 알림 {n_old}건 다시 보냄", "WARN")
-        alert(f"[상주 프로그램 시작] pid {os.getpid()}, env {CFG['env']}, 주문 {'켬' if CFG['orders_enabled'] else '끔'}, 코드 {git_state()}"
+        alert(f"[상주 프로그램 시작] pid {os.getpid()}, env {CFG['env']}, 주문 {'켬' if CFG['orders_enabled'] else '끔'}, 코드 {self.run_code}"
               + (", 시간대 오류로 매매 안 함" if self.tz_block else ""))
         if CFG.get("_filled"):  # 11K 보완 6: config.json 에 없어 config.example.json 기본값으로 채운 키
             rlog(f"설정: {CFG.get('_source')} 에 없는 키를 config.example.json 기본값으로 채움 {CFG['_filled']}", "WARN")
@@ -3632,6 +4272,10 @@ class Resident:
                  f"(데이터 확인 {BASE_T['data_check']}, 다시 적재 채택 경계 {BASE_T['no_reload_after']}, 재수집 시작·공개 마감 "
                  f"{BASE_T['refetch_start_until']}·{BASE_T['refetch_publish_by']}, 공식 시세 재시도 마감 {BASE_T['official_retry_until']})", "WARN")
         self.start_heartbeat()
+        try:
+            self.start_bot()  # 11W A: 조회 명령 (실패해도 상주는 계속)
+        except Exception as e:  # noqa: BLE001
+            rlog(f"텔레그램 조회 명령 시작 실패: {type(e).__name__}", "WARN")
         C.RateGate.configure(CFG.get("rate_limits"))  # 11L: 프로세스 전체 공용 키움 호출 제한기 (TR 별 간격, 실제 상주 실행에서만)
         rlog(f"키움 호출 제한기: {C.RateGate.limits}", "INFO")
         self.auto_monthly = True
@@ -3653,6 +4297,8 @@ class Resident:
             self.cur_step, self.last_tick = step, time.time()
             time.sleep(1.0)
         self.hb_stop.set()
+        if self.bot is not None:
+            self.bot.stop.set()
         self.shutdown()
 
     def shutdown(self):

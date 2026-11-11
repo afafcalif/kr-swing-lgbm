@@ -9,6 +9,7 @@
 """
 import copy
 import json
+import re
 import os
 import threading
 import traceback
@@ -124,6 +125,11 @@ def validate_snapshot(snap, day, min_traded=0.5, min_today=0.9):
 
 # ---------------------------------------------------------------- 하루 상태
 
+def _norm(msg):
+    """11W B2: 오류 글 같은 종류 비교용 (숫자·주소만 다른 것은 같음, notify.Repeat 와 같은 규칙)"""
+    return re.sub(r"0x[0-9a-fA-F]+|\d+", "#", str(msg))[:160]
+
+
 class Day:
     def __init__(self, path, date, clock=now_kst):
         self.date = pd.Timestamp(date).normalize()
@@ -207,8 +213,11 @@ class Day:
         """11I: key 로 남긴 오류 중 아직 해결 표시가 없는 것을 해결로 표시 (오류 기록은 그대로 두고 errors_resolved 에 따로). 반환: 표시한 수"""
         with self.lock:
             done = {r["i"] for r in self.s.get("errors_resolved") or []}
-            new = [{"i": t["i"], "key": key, "error": self.s["errors"][t["i"]][:200], "resolved_at": self.hms(), "by": by}
-                   for t in self.s.get("error_keys") or [] if t["key"] == key and t["i"] not in done and t["i"] < len(self.s["errors"])]
+            tagged = {t["i"] for t in self.s.get("error_keys") or [] if t["key"] == key and t["i"] < len(self.s["errors"])}
+            # 11W B2: 같은 오류(숫자만 다른 같은 글)가 키 없이 또 남았어도 그 오류의 모든 발생을 해결로
+            same = {_norm(self.s["errors"][i]) for i in tagged}
+            hit = sorted(i for i, e in enumerate(self.s["errors"]) if i in tagged or _norm(e) in same)
+            new = [{"i": i, "key": key, "error": self.s["errors"][i][:200], "resolved_at": self.hms(), "by": by} for i in hit if i not in done]
             if new:
                 self.s.setdefault("errors_resolved", []).extend(new)
                 self.save()

@@ -7,6 +7,7 @@ P0-2 일봉 대상 제외 종목의 원주가 판단이 이벤트를 하락으�
 
   python -m unittest backtest_swing/live/test_fix11u.py -v
 """
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import testguard; testguard.install()  # noqa: E401,E402,E702  (첫 줄 유지)
 import os  # noqa: E402
 os.environ["LIVE_CONFIG"] = "example"
 import sys
@@ -92,7 +93,7 @@ def raw_days(days, closes):
 
 
 class Gap(TR.Base):
-    """990006 손절가 9,000. 10-23 권리락 (10,000 -> 8,000, 수량 그대로) 날 상주 프로그램 안 돎 (마지막 확인 10-22). 오늘 10-26 기준가·전날 종가 8,000"""
+    """990010 손절가 9,000. 10-23 권리락 (10,000 -> 8,000, 수량 그대로) 날 상주 프로그램 안 돎 (마지막 확인 10-22). 오늘 10-26 기준가·전날 종가 8,000"""
     go, held = TR.Held.go, TR.Held.held
 
     def setUp(self):
@@ -122,7 +123,7 @@ class Gap(TR.Base):
         self.q["price"] = 7100.0                                                  # 조정된 손절가 아래 진짜 하락
         self.clk.at("09:01:00")
         res.stop_minute()
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990010"])
         self.assertAlmostEqual(self.held()["stop_price"], 7200.0)                 # 두 번 조정 안 함
 
     def test_unverifiable_gap_pauses_code(self):
@@ -130,21 +131,21 @@ class Gap(TR.Base):
         res = self.go("09:00:00", stop_price=9000.0, base_seen="2026-10-22")
         r = res.stop_minute()
         self.assertEqual(sends(self.fk, "kt10001"), [])
-        self.assertIn("990006", r["base_paused"])
+        self.assertIn("990010", r["base_paused"])
         h = self.held()
         self.assertTrue(P.in_review(h))
         self.assertEqual((h["stop_price"], h["base_review"]["days"]), (9000.0, ["2026-10-23"]))
-        self.assertTrue(any(a.startswith("[수동 확인 필요] 990006 기준가 확인 공백") for a in self.alerts))
+        self.assertTrue(any(a.startswith("[수동 확인 필요] 990010 기준가 확인 공백") for a in self.alerts))
         self.q["price"] = 7000.0
         self.clk.at("09:01:00")
         res.stop_minute()
         self.assertEqual(sends(self.fk, "kt10001"), [])                          # 사람이 확인할 때까지 자동 손절 안 함
         pos = P.load(self.R.POSITIONS)[0]
-        pos["held"]["990006"]["stop_price"] = 7200.0                             # 사람이 손절가를 고치면 해제
+        pos["held"]["990010"]["stop_price"] = 7200.0                             # 사람이 손절가를 고치면 해제
         P.save(self.R.POSITIONS, pos)
         self.clk.at("09:02:00")
         res.stop_minute()
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990010"])
 
     def no_gap(self, **kw):
         P.raw_factors = lambda code: (_ for _ in ()).throw(AssertionError("공백 없으면 일봉 안 읽음"))
@@ -152,7 +153,7 @@ class Gap(TR.Base):
         res.stop_minute()
         h = self.held()
         self.assertEqual((h["stop_price"], h["base_seen"], h.get("base_gap")), (9000.0, "2026-10-26", None))
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])   # 8,100 < 9,000 진짜 하락은 그대로 손절
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990010"])   # 8,100 < 9,000 진짜 하락은 그대로 손절
 
     def test_no_gap_normal_day(self):
         self.no_gap(base_seen="2026-10-23")
@@ -162,7 +163,7 @@ class Gap(TR.Base):
 
     def test_new_trade_records_entry_day(self):
         pos = P.empty()
-        self.assertEqual(P.new_trade(pos, "990006", "2026-10-23")["base_seen"], "2026-10-23")
+        self.assertEqual(P.new_trade(pos, "990010", "2026-10-23")["base_seen"], "2026-10-23")
 
 
 # ---------------------------------------------------------------- P0-2

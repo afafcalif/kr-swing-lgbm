@@ -245,9 +245,11 @@ def pool_workers(cfg=None):
     return max(1, min(n, os.cpu_count() or n))
 
 
-def sweep_frozen_tmp(root=None, max_age_s=6 * 3600):
+def sweep_frozen_tmp(root=None, max_age_s=6 * 3600, alive=None):
     """11O: 동결 대조 작업 프로세스의 임시 폴더(%TEMP%/live_frozen/{pid}) 중 오래된 것 지움 (예전에는 하루 n개씩 남았음). 반환: 지운 수"""
     import shutil
+    if alive is None:
+        from common import pid_alive as alive
     root = root or os.path.join(os.environ.get("TEMP", "."), "live_frozen")
     n = 0
     try:
@@ -259,7 +261,7 @@ def sweep_frozen_tmp(root=None, max_age_s=6 * 3600):
         if not name.isdigit() or not os.path.isdir(p):
             continue
         try:
-            if time.time() - os.path.getmtime(p) > max_age_s:
+            if time.time() - os.path.getmtime(p) > max_age_s and not alive(int(name)):  # 11W C5: 실행 중 프로세스(오래 도는 묶음)의 폴더는 안 지움
                 shutil.rmtree(p, ignore_errors=True)
                 n += 1
         except OSError:

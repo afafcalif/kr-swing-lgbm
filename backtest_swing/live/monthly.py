@@ -40,6 +40,7 @@ DATASET_DIR = "models_live/datasets"
 PREVIEW_DIR = "models_live/preview"
 OUT_DIR = os.path.join(LOG_DIR, "monthly")
 UNIVERSE_MAX_DROP = 0.05
+UNIVERSE_TRIES, UNIVERSE_GAP = 3, 60  # 11W C1: 종목 목록 갱신 시도 횟수·간격(초) (KRX 일시 실패)
 N_BASELINE = 300
 
 
@@ -230,6 +231,43 @@ def compare_baseline(month, model_dir, meta):
             "corr": float(np.corrcoef(pred, ref)[0, 1]) if len(ref) > 2 else None, "top30_overlap": len(top(pred) & top(ref))}
 
 
+def update_universe_retry(p, data_last, tries=UNIVERSE_TRIES, gap=UNIVERSE_GAP, sleep=time.sleep, fn=None):
+    """11W C1: 종목 목록 갱신을 tries 번까지 (예외·ok False 모두 다시, 사이 gap 초). 반환 마지막 기록 + attempts (각 시도 결과 요약)"""
+    fn = fn or update_universe
+    tried, u = [], {}
+    for i in range(tries):
+        try:
+            u = fn(p, data_last)
+        except Exception as e:  # noqa: BLE001
+            u = {"ok": False, "error": repr(e)[:300]}
+        tried.append({"at": f"{now_kst():%H:%M:%S}", "ok": bool(u.get("ok")), "error": u.get("error")})
+        if u.get("ok"):
+            break
+        if i + 1 < tries:
+            sleep(gap)
+    return {**u, "attempts": tried}
+
+
+def universe_only(month):
+    """11W C1: 모델은 설치됐는데 종목 목록 갱신이 실패한 달 -> 종목 목록만 다시 (monthly.py universe {월}, 상주 프로그램이 부름). 결과 파일을 고쳐 씀"""
+    out_json = os.path.join(OUT_DIR, f"{month}.json")
+    rec = json.load(open(out_json, encoding="utf-8"))
+    rec.setdefault("first_started", rec.get("started"))
+    rec["started"] = f"{now_kst():%Y-%m-%d %H:%M:%S}"
+    try:
+        if not (rec.get("steps", {}).get("installed") or {}).get("check_ok"):
+            raise RuntimeError("모델이 설치되지 않은 달 -> run 으로")
+        u = update_universe_retry(rec.get("plan") or plan(month), rec["data_last"])
+        rec["steps"]["universe"] = u
+        rec["ok"] = bool(u.get("ok"))
+        rec["error"] = None if rec["ok"] else f"종목 목록 갱신 실패 (모델은 설치됨): {u.get('error')}"
+    except Exception as e:  # noqa: BLE001
+        rec["ok"], rec["error"] = False, repr(e)[:600]
+    rec["finished"] = f"{now_kst():%Y-%m-%d %H:%M:%S}"
+    atomic_json(out_json, rec)
+    return rec
+
+
 def run(month, preview=False):
     t0 = time.time()
     rec = {"month": month, "preview": preview, "started": f"{now_kst():%Y-%m-%d %H:%M:%S}", "git_commit": git_commit(), "ok": False, "steps": {}}
@@ -289,7 +327,7 @@ def run(month, preview=False):
             rec["steps"]["installed"] = {"path": final, "check_ok": chk2["ok"]}
             if not chk2["ok"]:
                 raise RuntimeError(f"설치 뒤 모델 검사 실패: {chk2}")
-            u = update_universe(p, b["data_last"])
+            u = update_universe_retry(p, b["data_last"])  # 11W C1: 실패면 다시 (모델은 이미 설치됨)
             rec["steps"]["universe"] = u
             if not u.get("ok"):
                 raise RuntimeError(f"종목 목록 갱신 실패 (모델은 설치됨): {u.get('error')}")
@@ -338,7 +376,7 @@ if __name__ == "__main__":
     if cmd == "plan":
         print(json.dumps(plan(mo), ensure_ascii=False))
         sys.exit(0)
-    r = run(mo, preview="--preview" in sys.argv[3:])
+    r = universe_only(mo) if cmd == "universe" else run(mo, preview="--preview" in sys.argv[3:])
     print(summary_line(r), flush=True)
     print(json.dumps({k: v for k, v in r.items() if k != "trace"}, ensure_ascii=False, default=str), flush=True)
     sys.exit(0 if r["ok"] else 1)

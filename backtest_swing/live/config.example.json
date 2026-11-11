@@ -30,7 +30,6 @@
     "buy_from": "15:21:00",
     "plan_start_until": "15:26:00",
     "plan_deadline": "15:27:00",
-    "buy_until": "15:25:00",
     "no_new_order_after": "15:28:00",
     "close_check": "15:35:00",
     "settle": "15:40:00",

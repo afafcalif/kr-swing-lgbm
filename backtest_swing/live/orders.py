@@ -395,11 +395,11 @@ def new_duty(kind, since, reason, **kw):
 ZERO_CONFIRM_SEC = 60  # 11J 보완 3 R1: 보유 0 을 이 간격(초) 이상 두고 두 번 연속 확인해야 의무 끝
 
 
-def closed_codes(positions, day):
+def closed_codes(positions, day, reheld=False):
     """11N: 오늘(day) 매도 의무가 계좌 보유 0 두 번으로 끝난 종목 (positions["closed_today"], 15:40 보유 갱신 전까지 보유 파일에 남은 판 종목).
-    날짜가 다른 표시는 무효"""
+    날짜가 다른 표시는 무효. 같은 날 다시 보유가 보인 종목(reheld: 재매수 등)은 빠짐 (손절 감지·의무는 원래대로), reheld True 면 넣음 (11W H 장중 수량 검사)"""
     day = str(pd.Timestamp(day).date())
-    return {c for c, x in (positions.get("closed_today") or {}).items() if (x or {}).get("date") == day}
+    return {c for c, x in (positions.get("closed_today") or {}).items() if (x or {}).get("date") == day and (reheld or not (x or {}).get("reheld"))}
 
 
 def end_duties(positions, acct, now):
@@ -411,8 +411,10 @@ def end_duties(positions, acct, now):
     now = pd.Timestamp(now)
     closed = positions.get("closed_today") or {}
     for c in list(closed):
-        if (closed[c] or {}).get("date") != f"{now:%Y-%m-%d}" or int((acct.get(c) or {}).get("qty", 0)) > 0:
-            closed.pop(c)  # 같은 날 다시 보유(재매수 등)면 원래대로
+        if (closed[c] or {}).get("date") != f"{now:%Y-%m-%d}":
+            closed.pop(c)
+        elif int((acct.get(c) or {}).get("qty", 0)) > 0:  # 같은 날 다시 보유(재매수 등)면 원래대로 (closed_codes 밖), 11W H: 표시는 남김 (당일 신규 거래)
+            closed[c].setdefault("reheld", f"{now:%H:%M:%S}")
     ended, first = [], []
     for c, du in list(duty.items()):
         if int((acct.get(c) or {}).get("qty", 0)) > 0:
@@ -432,18 +434,78 @@ def end_duties(positions, acct, now):
     return ended, first
 
 
-def qty_changes(held, acct, records, date):
-    """11K 7: 체결 없이 보유 수량이 바뀐 종목 = 상태 파일 수량과 성공한 계좌 조회 수량이 다르고(둘 다 > 0) 오늘 그 종목 매수·매도 의도가
-    하나도 없음(NOT_SENT 만 있으면 없는 것으로). 액면분할·병합·무상증자 추정. 반환 {code: {file, account}}"""
+def qty_over(positions, acct, day):
+    """11W H 장중 수량 규칙 (손절 감시·08:30 장 전 대조): 계좌 수량 > 장부 수량인 종목 = 수동 확인 대상 (그 분 새 손절 감지·전송에서 뺌).
+    장중에는 장부를 맞추지 않는다 — 계좌가 장부보다 적으면 매도 수량이 min(매도 가능, 장부) 로 있는 만큼 (duty_sell), 맞추는 것은 체결이 확정된
+    07:00 아침 복구·15:40 보유 갱신에서만 (qty_settle). 오늘 의도가 있든 없든 같은 검사. 밖: 장부 수량 0,
+    오늘 판 종목(closed_today, 같은 날 다시 보유 = 당일 신규 거래 포함: 그 수량은 15:40 이 새 거래로). 수동 확인 표시는 그 종목 장부 수량을 계좌로
+    (positions.mark_qty_review: 같은 변화를 다시 감지하지 않고, 사람이 표시를 끝내면 그 수량으로 매매). 반환 {code: {file, account}}"""
+    closed = closed_codes(positions, day, reheld=True)
     out = {}
-    for c, p in held.items():
-        fq, aq = int(p.get("qty", 0)), int((acct.get(c) or {}).get("qty", 0))
-        if fq <= 0 or aq <= 0 or fq == aq:
-            continue
-        mine = [r for r in records if r.get("date") == date and r.get("code") == c and r.get("side") in ("buy", "sell") and r.get("status") != NOT_SENT]
-        if not mine:
-            out[c] = {"file": fq, "account": aq}
+    for c, p in (positions.get("held") or {}).items():
+        f, a = int(p.get("qty", 0)), int((acct.get(c) or {}).get("qty", 0))
+        if f > 0 and a > f and c not in closed:
+            out[c] = {"file": f, "account": a}
     return out
+
+
+def fill_final(i, today, cancelled=()):
+    """11W H: 확정 시점에 이 의도의 체결 수량이 확정됐는가. NOT_SENT·REJECTED = 0 으로 확정, UNKNOWN·SENDING = 미확정,
+    접수(ACCEPTED) = 체결 수량을 알고(fill_known: 15:35 잔량 확인 또는 체결 조회, 또는 주문 수량만큼 다 체결) 남은 수량이 없을 때
+    (지난 날 주문의 잔량·취소 확정된 잔량은 끝남)"""
+    st = i.get("status")
+    if st in (NOT_SENT, REJECTED):
+        return True
+    q, f, u = int(i.get("qty") or 0), int(i.get("filled_qty") or 0), i.get("unfilled_qty")
+    if st != ACCEPTED or not (fill_known(i) or f >= q):  # 주문 수량만큼 다 체결 = 더 체결될 수 없음
+        return False
+    gone = int(u or 0) if str(i.get("date")) < str(today) or str(i.get("ord_no") or "") in cancelled else 0
+    return q - f - gone <= 0
+
+
+def qty_settle(book, acct_qty, items, code, through, today, detail=None):
+    """11W H 확정 시점 수량 확인 (07:00 아침 복구·15:40 보유 갱신). 센 의도 = 그 종목 매수·매도 중 날짜 > through (장부에 반영된 마지막 날).
+    반환 (how, net, open): 오늘 미확정 의도(fill_final 아님)가 있으면 "wait" (맞추지 않고 다음 확정 시점으로, 장중 규칙 그대로). 미확정이 지난 날 의도뿐이면
+    "account" (체결 조회는 그날 것만이라 더 확인할 길이 없음 = 15:35 전 종료한 날: 예전 복구 규칙대로 계좌 기준, 그날 UNKNOWN 은 잔고로 확정·
+    rebuild_pending·애매하면 ambiguous) — 11W I: 단 확정 체결 순합·그 의도들의 이미 확인된 체결을 뺀 남은 변화가 그 의도들 방향(매도 감소·매수 증가)이고
+    크기가 남은 요청 수량 합 이내일 때만, 밖(방향 반대·요청 초과: 분할·수동 매매)이면 "review". 모두 확정이면 계좌 == 장부 + 확정 체결 순합(net = 매수 filled_qty - 매도 filled_qty) 일 때만 "sync",
+    다르면 "review". open = 미확정 의도. detail(dict)이 있으면 남은 변화 rest·남은 요청 sell_rest·buy_rest 를 채움 (11W J4: 미리 확정 안 한 UNKNOWN 을 계산 결과대로)"""
+    cancelled = {str(x.get("orig_ord_no")) for x in items if x.get("stage") == "cancel" and x.get("status") == ACCEPTED}
+    net, opened, now_open, part, sell_rest, buy_rest = 0, [], False, 0, 0, 0
+    for i in items:
+        if i.get("code") != code or i.get("side") not in ("buy", "sell") or not str(i.get("date") or "") > str(through or ""):
+            continue
+        if not fill_final(i, today, cancelled):
+            opened.append(i.get("intent_id"))
+            now_open = now_open or str(i.get("date")) >= str(today)
+            q, f = int(i.get("qty") or 0), int(i.get("filled_qty") or 0) if i.get("status") == ACCEPTED else 0
+            part += f if i["side"] == "buy" else -f
+            if i["side"] == "buy":
+                buy_rest += max(q - f, 0)
+            else:
+                sell_rest += max(q - f, 0)
+            continue
+        f = int(i.get("filled_qty") or 0) if i.get("status") == ACCEPTED else 0
+        net += f if i["side"] == "buy" else -f
+    if opened:
+        if now_open:
+            return "wait", net, opened
+        r = int(acct_qty) - int(book) - net - part  # 11W I: 미확정 의도로만 설명해야 할 남은 변화
+        if detail is not None:
+            detail.update(rest=r, sell_rest=sell_rest, buy_rest=buy_rest)
+        return ("account" if -sell_rest <= r <= buy_rest else "review"), net, opened
+    return ("sync" if int(book) + net == int(acct_qty) else "review"), net, opened
+
+
+def open_desc(items, ids):
+    """11W I [수량 추정 확정] 알림의 근거 의도: '날짜 매도 10주(체결 확인 0)' 목록"""
+    by = {i.get("intent_id"): i for i in items}
+    out = []
+    for x in ids:
+        i = by.get(x) or {}
+        out.append(f"{i.get('date')} {'매수' if i.get('side') == 'buy' else '매도'} {int(i.get('qty') or 0)}주"
+                   f"({i.get('status')}, 체결 확인 {int(i.get('filled_qty') or 0)}) {x}")
+    return ", ".join(out)
 
 
 def duty_inputs(positions, codes, acct):
@@ -464,6 +526,7 @@ def stop_cycle(om, watch, positions, quote_fn, balance_fn, now, mismatch_seen=No
        계좌 조회 실패면 걸린 매도가 없을 때만 보유 파일 수량. send_budget(초): 순회 시간 상한, 넘으면 남은 종목은 다음 분 맨 앞 (om.send_left).
        11U 보완 2: 그날 마지막 전송 분(om.last_send_minute)은 다음 분이 없으므로 상한 대신 전송 마감까지 (종목마다 한 번)
        11U 보완 1: before_detect 뒤 수동 확인 상태를 다시 읽어 새로 걸린 종목은 기존 의무 포함 이번 분 전송에서 뺌
+    11W H: 계좌 수량 > 장부 수량인 종목(qty_over)은 수동 확인 대상, 이번 분 감지·전송에서 뺌. 장부는 맞추지 않음 (매도 수량 = min(매도 가능, 장부))
     체결 조회는 하지 않는다. 반환: dict
     11R C: before_detect(prices) 를 주면 시세 조회 뒤·새 손절 감지 전에 부른다 (그날 이벤트 손절가 조정). 돌려준 종목은 이번 분 새 손절 감지에서 뺌"""
     held_pos = {c: p for c, p in positions.get("held", {}).items() if p.get("qty", 0) > 0}
@@ -493,7 +556,7 @@ def stop_cycle(om, watch, positions, quote_fn, balance_fn, now, mismatch_seen=No
     # 11K 보완 3: 체결로 설명 안 되는 수량 변화(이번 분 새로 본 것 = changed, 호출한 쪽이 수동 확인 표시)와 수동 확인 중인 종목(paused)은
     # 자동 손절·추세 매도와 새 손절 감지를 멈춘다 (자동 조정 없음, 사람이 확인할 때까지)
     from positions import in_review
-    changed = qty_changes(held_pos, acct, om.records, om.date()) if acct is not None else {}
+    changed = qty_over(positions, acct, now) if acct is not None else {}  # 11W H (예전 qty_changes 는 오늘 의도가 하나라도 있으면 건너뜀)
     paused = sorted(c for c, p in held_pos.items() if in_review(p))
     stopped = set(changed) | set(paused)
     # ③ 새 손절 감지 (2026-10-24 F-01: 계좌 조회가 됐는데 계좌에 없으면 매도 대상에서 뺀다)
@@ -980,7 +1043,8 @@ class OrderManager:
     def duty_sell(self, stage, c, h, kind, reason, assumed_kind, window, retry_now, extra=None):
         """매도 의무 한 번 (손절·추세 매도·늦은 추세 매도 같은 경로, 11J 보완 3). h = {file_qty: 보유 파일 수량, acct: 같은 분 계좌 {qty, sellable} 또는 None}
         (도구·시험의 {qty, sellable} 은 계좌 보유로 봄). 계좌 조회 됨: 매도 가능 수량 (증권사가 걸린 매도를 이미 뺀 값, 0 이면 그 분은 안 보냄).
-        계좌 조회 실패: 오늘 이 종목에 접수·UNKNOWN·SENDING 매도가 하나도 없을 때만 보유 파일 수량 (초과분은 증권사 거부로 끝남)"""
+        계좌 조회 실패: 오늘 이 종목에 접수·UNKNOWN·SENDING 매도가 하나도 없을 때만 보유 파일 수량 (초과분은 증권사 거부로 끝남).
+        11W H: 계좌 조회 됨이면 수량 = min(매도 가능 수량, 보유 파일(장부) 수량)"""
         if "acct" not in h and "file_qty" not in h:
             h = {"file_qty": int(h.get("qty", 0)), "acct": None if h.get("no_acct") else h}
         a = h.get("acct")
@@ -988,7 +1052,11 @@ class OrderManager:
             q = int(a.get("sellable") or 0) if int(a.get("qty") or 0) > 0 else 0
             if q <= 0:
                 return {"skipped": f"계좌 매도 가능 0 (보유 {int(a.get('qty') or 0)}주) — 걸린 매도 주문 대기", "code": c}
-            basis, before = "계좌 매도 가능 수량", int(a["qty"])
+            fq = int(h.get("file_qty") or 0)
+            if fq <= 0:  # 11W H: 장부 수량까지만 판다 (장부에 없으면 안 보냄)
+                return {"skipped": f"장부 수량 0 (계좌 매도 가능 {q}주) — 보내지 않음", "code": c}
+            basis, before = ("계좌 매도 가능 수량" if q <= fq else f"장부 수량 (계좌 매도 가능 {q}주 > 장부)"), int(a["qty"])
+            q = min(q, fq)  # 11W H: 매도 수량 = min(계좌 매도 가능, 장부) — 계좌가 적으면 있는 만큼, 많아도 장부까지
         else:
             blk = self.store.blocking(self.date(), c, side="sell")
             if blk is not None:

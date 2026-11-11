@@ -5,6 +5,7 @@
 
   python -m unittest backtest_swing/live/test_fetchfill.py -v
 """
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import testguard; testguard.install()  # noqa: E401,E402,E702  (첫 줄 유지)
 import os  # noqa: E402
 os.environ["LIVE_CONFIG"] = "example"
 import shutil
@@ -293,18 +294,18 @@ class Release(Base):
         self.assertFalse(any("해제" in a for a in self.alerts))
 
     def snap_buy(self, base):
-        """15:18 스냅샷·계획 -> 15:22 매수. 990006 = 공식 값으로 채운 종목 (채운 종가 10,000), 전날 평균 39억(후보 밖), 당일 300억 급증으로 상위 1"""
+        """15:18 스냅샷·계획 -> 15:22 매수. 990010 = 공식 값으로 채운 종목 (채운 종가 10,000), 전날 평균 39억(후보 밖), 당일 300억 급증으로 상위 1"""
         import test_codex
         from test_orders import sends
         E = test_codex.E
         res = test_codex.Codex.snapshot_ready(self)
-        raw = pd.DataFrame({"stk_cd": ["990006", "005930"], "upl_pric": ["+13000", "+78000"], "base_pric": [base, "60000"]})
-        snap = pd.DataFrame({"code": ["990006", "005930"], "open": [9800.0, 60000.0], "high": [10500.0, 61000.0], "low": [9700.0, 59000.0],
+        raw = pd.DataFrame({"stk_cd": ["990010", "005930"], "upl_pric": ["+13000", "+78000"], "base_pric": [base, "60000"]})
+        snap = pd.DataFrame({"code": ["990010", "005930"], "open": [9800.0, 60000.0], "high": [10500.0, 61000.0], "low": [9700.0, 59000.0],
                              "close": [10000.0, 60000.0], "volume": [3e6, 100.0], "amount": [3e10, 1e6], "dt": ["20261026"] * 2})
         test_codex.Q.snapshot = lambda caller, cs, **k: (raw, snap, {"returned": 2, "codes": 2, "seconds": 1.0})
-        res.ctx.update(amt20={"990006": 3.9e9, "005930": 9e9}, filled={"990006": {"last_close": 10000.0, "dates": ["2026-10-23"]}})
-        top = pd.DataFrame({"code": ["990006"], "score": [0.9], "raw_close": [10000.0]})
-        out = {"filter": {"filter_ok": True, "prev_kospi_close": 2700.0, "prev_kospi_ma120": 2500.0}, "eligible": pd.DataFrame({"code": ["990006"], "score": [0.9]}),
+        res.ctx.update(amt20={"990010": 3.9e9, "005930": 9e9}, filled={"990010": {"last_close": 10000.0, "dates": ["2026-10-23"]}})
+        top = pd.DataFrame({"code": ["990010"], "score": [0.9], "raw_close": [10000.0]})
+        out = {"filter": {"filter_ok": True, "prev_kospi_close": 2700.0, "prev_kospi_ma120": 2500.0}, "eligible": pd.DataFrame({"code": ["990010"], "score": [0.9]}),
                "market": {}, "errors": [],
                "ledgers": {n: {"top3": top, "busy": [], "skipped_busy": [], "ledger_status": []} for n in ("strategy", "full")}}
         saved = E.run_day
@@ -321,12 +322,12 @@ class Release(Base):
         """11Q A: 공식 값으로 채운 종목도 기준가로 그날 계수 (기준가 9,800 ≠ 채운 종가 10,000 -> 이벤트 계수) -> 11P 보완 filled_base 하루 차단 없음"""
         res, sent = self.snap_buy("9800")
         self.assertNotIn("filled_base", res.day.s.get("buy_block") or [])
-        self.assertEqual([s[2]["stk_cd"] for s in sent], ["990006"])
+        self.assertEqual([s[2]["stk_cd"] for s in sent], ["990010"])
 
     def test_filled_base_match_buys(self):
         res, sent = self.snap_buy("10000")
         self.assertFalse(res.day.s.get("buy_block"))
-        self.assertEqual([s[2]["stk_cd"] for s in sent], ["990006"])            # 정상 매수
+        self.assertEqual([s[2]["stk_cd"] for s in sent], ["990010"])            # 정상 매수
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ SNAPSHOT_RELATIVE = {"data_check": -90, "no_reload_after": -30, "refetch_publish
                      "official_retry_until": -1110, "monthly_deadline": -1110}
 # config.json 에 남아 있어도 쓰지 않는 예전 키 (서브 PC config.json 은 예전 config.example.json 을 통째로 복사한 것이라 snapshot 15:18:30 등이 들어 있음)
 LEGACY_SNAPSHOT_KEYS = ("snapshot", "measure_snapshot", "measure_until", *SNAPSHOT_RELATIVE)
+UNUSED_TIME_KEYS = ("buy_until",)  # 11W (C7): 11L 보완 2 뒤로 안 쓰는 시각 (매수 전송 마감은 no_new_order_after 하나). 예전 config.json 에 있으면 버림
 
 
 def snapshot_times(times):
@@ -29,7 +30,7 @@ def snapshot_times(times):
     s = datetime.datetime.strptime(f"2000-01-01 {times['plan_snapshot']}", "%Y-%m-%d %H:%M:%S")
     new = {"snapshot": times["plan_snapshot"],
            **{k: (s + datetime.timedelta(seconds=v)).strftime("%H:%M:%S") for k, v in SNAPSHOT_RELATIVE.items()}}
-    old = {k: times.pop(k) for k in LEGACY_SNAPSHOT_KEYS if k in times}
+    old = {k: times.pop(k) for k in LEGACY_SNAPSHOT_KEYS + UNUSED_TIME_KEYS if k in times}
     times.update(new)
     return {k: v for k, v in old.items() if new.get(k) != v}
 

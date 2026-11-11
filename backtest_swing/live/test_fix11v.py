@@ -10,6 +10,7 @@ P1-6 15:35 취소: NOT_SENT(유량·인증) 두 번이면 더 안 보냄
 
   python -m unittest backtest_swing/live/test_fix11v.py -v
 """
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import testguard; testguard.install()  # noqa: E401,E402,E702  (첫 줄 유지)
 import os  # noqa: E402
 os.environ["LIVE_CONFIG"] = "example"
 import json
@@ -127,7 +128,7 @@ class Cancel(unittest.TestCase):
         self.clk, self.fk, self.om, _ = setup("2026-10-26 15:35:10")
         self.res = []
         self.om.b.cancel = lambda no, code, q: (self.res.pop(0) if self.res else {"outcome": O.ACCEPTED, "ord_no": "9"})
-        self.r = {"ord_no": "1001", "code": "990006", "kind": "본래"}
+        self.r = {"ord_no": "1001", "code": "990010", "kind": "본래"}
 
     def tries(self):
         return [i["status"] for i in self.om.records if i["stage"] == "cancel"]

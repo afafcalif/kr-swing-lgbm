@@ -3,6 +3,7 @@
 
   python -m unittest backtest_swing/live/test_mock1.py -v
 """
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import testguard; testguard.install()  # noqa: E401,E402,E702  (첫 줄 유지)
 import os  # noqa: E402
 os.environ["LIVE_CONFIG"] = "example"  # 11K 보완 8: 시험은 로컬 config.json 을 읽지 않음 (config.example.json 만)
 import json
@@ -147,7 +148,7 @@ class AfterClose(AfterCloseBase):
         d = res.day
         d.err("모델 로드 확인 True, 전날 일봉 반영 False -> 그날 신규 매수 안 함", key="prep_data")   # 07:18 오류
         d.resolve("prep_data", "공식 시세 반영 뒤 다시 적재: 전날 일봉 반영 True")                   # 08:09 해결
-        d.set("settlement", {"account": {"990006": 28}, "d2": 30_000_000.0, "diff": {}})
+        d.set("settlement", {"account": {"990010": 28}, "d2": 30_000_000.0, "diff": {}})
         d.set("cash_check", {"ok": None, "note": "전 거래일(2026-10-23) D+2 추정예수금 기록 없음 -> 대조 안 함", "actual_d2": 30_000_000.0})
         res.start_close_calc()
         self.assertTrue(wait_for(res.close_ready))

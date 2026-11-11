@@ -5,6 +5,7 @@
 
   python -m unittest backtest_swing/live/test_failshare.py -v
 """
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import testguard; testguard.install()  # noqa: E401,E402,E702  (첫 줄 유지)
 import os  # noqa: E402
 os.environ["LIVE_CONFIG"] = "example"
 import json
@@ -24,7 +25,7 @@ import engine as E  # noqa: E402
 import quotes as Q  # noqa: E402
 
 CODES40 = [f"9{i:05d}" for i in range(40)]
-CODES100 = ["990006"] + [f"9{i:05d}" for i in range(99)]
+CODES100 = ["990010"] + [f"9{i:05d}" for i in range(99)]
 
 
 class DailyStage(Base):
@@ -77,8 +78,8 @@ class SnapshotStage(Base):
         Q.snapshot = lambda caller, cs, **k: (raw, snap, {"returned": len(CODES100), "codes": len(CODES100), "seconds": 1.0})
         C.sd.universe_codes = lambda: list(CODES100)
         res.ctx.update(amt20={c: 1e9 for c in CODES100}, excluded={"fetch_error": list(daily_fail), "missing_row": []})
-        top = pd.DataFrame({"code": ["990006"], "score": [0.9], "raw_close": [33000.0]})
-        out = {"filter": {"filter_ok": True, "prev_kospi_close": 2700.0, "prev_kospi_ma120": 2500.0}, "eligible": pd.DataFrame({"code": ["990006"], "score": [0.9]}),
+        top = pd.DataFrame({"code": ["990010"], "score": [0.9], "raw_close": [33000.0]})
+        out = {"filter": {"filter_ok": True, "prev_kospi_close": 2700.0, "prev_kospi_ma120": 2500.0}, "eligible": pd.DataFrame({"code": ["990010"], "score": [0.9]}),
                "market": {}, "errors": [], "ledgers": {n: {"top3": top, "busy": [], "skipped_busy": [], "ledger_status": []} for n in ("strategy", "full")}}
         saved = E.run_day
         try:
@@ -101,7 +102,7 @@ class SnapshotStage(Base):
         self.assertEqual(sorted(x["code"] for x in f["all"]), ["900010", "900011"])
         self.assertEqual((f["total"], f["share"]), (100, 0.02))
         self.assertNotIn("market_fail:스냅샷·계산 실패", res.day.s.get("buy_block") or [])
-        self.assertEqual([s[2]["stk_cd"] for s in sent], ["990006"])
+        self.assertEqual([s[2]["stk_cd"] for s in sent], ["990010"])
 
     def test_loaded_anomalies_5pct_still_block(self):
         res, sent = self.plan_buy(["900001"], ["900001"] + [f"9000{i}" for i in range(10, 15)])   # 적재된 종목 이상 5 / 100 = 5%

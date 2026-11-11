@@ -3,13 +3,16 @@
 
 형식:
   held: {종목: {qty, avg_price, trade_id, entry_date, entry_price, stop_price, stop_temp, stop_basis, kind,
-                trend_sell_next_open, judged_on, close_1530, base_seen, base_gap?, base_review?}}
+                trend_sell_next_open, judged_on, close_1530, base_seen, base_gap?, base_review?, qty_review?, review_base?, synced_through?}}
          (11U: base_seen = 마지막으로 그날 기준가를 확인한 거래일. 새 거래는 진입일, 없으면(예전 장부) 공백 없음으로 보고 첫 확인 때 기록)
   sell_duty: {종목: {kind(stop 손절 진행 중 / trend 추세 매도), since(발생일), at(발생 시각), reason, price?, stop?}}
              (11J 보완 3: 매도 의무는 종목 코드 단위. 끝 = 성공한 계좌 조회에서 그 종목 보유 0, orders.end_duties)
   next_open_sells: {종목: {reason, since, attempts, last_status, last_try, last_intent}}   (다음 날 시가 매도 목록 = 15:35·15:40 에 계좌 보유가 남은 의무 종목)
   closed_today: {종목: {date, at, kind}}   (11N: 오늘 의무가 계좌 보유 0 두 번으로 끝난 판 종목. 15:40 보유 갱신 전까지 새 손절 감지·매수 계획의
-                의무 판단·추세 매도에서 뺌. 날짜가 다르면 무효, 계좌에 다시 보유가 보이면 지움, 15:40 보유 갱신 뒤 지움. orders.closed_codes)
+                의무 판단·추세 매도에서 뺌. 날짜가 다르면 무효, 계좌에 다시 보유가 보이면 reheld 시각을 적고 감지는 원래대로 (11W H: 장중 수량 검사는
+                계속 밖 = 당일 신규 거래), 15:40 보유 갱신 뒤 지움. orders.closed_codes)
+  qty_synced: {through, date, time, by}   (11W H: 장부에 반영된 의도의 마지막 날 through. 확정 시점(07:00 아침 복구·15:40)에 계좌 == 장부 + through 뒤
+              확정 체결 순합일 때만 장부를 계좌로. 못 맞춘 종목은 held[종목].synced_through = 이전 날, 수동 확인 표시가 바꾼 수량은 review_base = 표시 전 수량)
   trade_seq, duty_format, _version, _saved_at
 
 - 저장할 때 직전 파일을 positions.json.bak 으로 남긴다 (Codex 8). 파일이 없으면 빈 보유. 읽기 실패(손상)면 손상 파일을 보관하고 백업으로 복구,
@@ -316,15 +319,26 @@ def temp_stop(code, avg_price, day):
 
 def mark_qty_review(pos, code, acct_qty, day, at, where, price=None):
     """체결로 설명되지 않는 보유 수량 변화 (액면분할·병합·무상증자·사람 거래 등, 자동 조정 안 함) -> 수동 확인 필요 (qty_review).
-    손절가·진입가는 그대로. 수량만 계좌 값으로 (같은 변화를 다시 감지하지 않게, 옛 수량은 표시에). 반환 표시"""
+    손절가·진입가는 그대로. 수량만 계좌 값으로 (같은 변화를 다시 감지하지 않게, 사람이 표시를 끝내면 그 수량으로 매매, 옛 수량은 표시에).
+    11W H: 표시 전 장부 수량을 review_base 에 (그 뒤 첫 확정 시점까지 처음 것): 확정 시점 수량 확인의 기준 장부 수량 (book_qty).
+    11W K1: 확인 대상 review_ack = 표시 때 계좌 수량·날짜·시각 (사람이 끝내면 그 수량을 확인한 것). 반환 표시"""
     p = pos["held"][code]
     old = int(p.get("qty", 0))
     rec = {"date": str(day), "at": at, "where": where, "file_qty": old, "account_qty": int(acct_qty),
            "ratio": f"{int(acct_qty)}/{old} = {int(acct_qty) / old:.3f}" if old else "-", "stop": p.get("stop_price"), "price": price,
            "clear": "사람이 공시·체결 내역으로 확인한 뒤 이 표시(qty_review)를 지우거나 손절가를 고친다 (손절가가 바뀌면 끝난 것으로 봄)"}
+    rec["ack_qty"] = int(acct_qty)  # 11W K1: 사람이 이 표시를 끝내면 확인하는 수량 (표시 때 계좌)
     p["qty_review"] = rec
+    p.setdefault("review_base", {"date": str(day), "qty": old})
+    p["review_ack"] = {"qty": int(acct_qty), "date": str(day), "at": at}  # 11W K1: 확인 대상 (다시 표시하면 새것, 확인을 받으면 지움, 맞춰도 남음)
     p["qty"] = int(acct_qty)
     return rec
+
+
+def book_qty(p):
+    """11W H: 확정 시점 수량 확인의 장부 수량 = 마지막 확정(through) 때 장부 수량. 그 뒤 수동 확인 표시가 수량을 계좌로 바꿨으면 표시 전 수량 (review_base)"""
+    rb = (p or {}).get("review_base")
+    return int(rb["qty"]) if isinstance(rb, dict) and rb.get("qty") is not None else int((p or {}).get("qty", 0))
 
 
 REVIEW_KEYS = ("qty_review", "base_review")  # 11U: base_review = 기준가 확인 공백 기간의 이벤트를 확인 못 함 (같은 사람 해제 방식)
@@ -478,9 +492,27 @@ def mark_base_review(p, day, at, rec):
     return p["base_review"]
 
 
-def mark_synced(pos, day, at, by):
-    """보유 장부 수량을 계좌로 맞춘 때 (11K 보완 3: 이 날 이후의 의도만 수량 변화를 설명한다)"""
-    pos["qty_synced"] = {"date": str(day), "time": at, "by": by}
+def mark_synced(pos, day, at, by, through):
+    """보유 장부 수량을 계좌로 맞춘 때 (11K 보완 3). 11W H: through = 장부에 반영된 의도의 마지막 날 (15:40 = 그날, 아침 복구 = 전 거래일).
+    다음 확정 시점은 이 날 뒤 의도의 확정 체결만 센다. 종목별 예외(synced_through: 이번에 못 맞춘 종목의 이전 날)는 지움 (부른 쪽이 다시 씀)"""
+    pos["qty_synced"] = {"through": str(through), "date": str(day), "time": at, "by": by}
+    for p in (pos.get("held") or {}).values():
+        p.pop("synced_through", None)
+        p.pop("review_base", None)  # 장부를 계좌로 맞췄으니 표시 전 수량은 필요 없음
+
+
+def synced_through(pos, code, prev_day=None):
+    """11W H: 그 종목 장부에 반영된 의도의 마지막 날 (종목별 synced_through, 없으면 장부 qty_synced.through). 예전 기록(날짜만)은
+    15:40 보유 갱신이면 그날, 아침·장부 복구면 그 전 거래일 (prev_day(날짜) -> 전 거래일 문자열). 없으면 None"""
+    p = ((pos.get("held") or {}).get(code) or {})
+    if p.get("synced_through"):
+        return str(p["synced_through"])
+    q = pos.get("qty_synced") or {}
+    if q.get("through"):
+        return str(q["through"])
+    if not q.get("date"):
+        return None
+    return str(q["date"]) if str(q.get("by", "")).startswith("15:40") or prev_day is None else str(prev_day(q["date"]))
 
 
 # ---------------------------------------------------------------- 현금 대조 (Codex 20)
@@ -515,6 +547,42 @@ def expected_cash(prev_d2, records, year, commission=None):
     return cash, n
 
 
+def realized_pnl(records, held, baseline=None, commission=None, year=None):
+    """11W: 오늘 실현손익 = 매도 체결(주문)마다 수량 x (체결가 - 진입가) - 매도 수수료·세금 - 그 수량의 매수 수수료 (진입가 기준, 키움 절사 규칙).
+    진입가 = 보유 장부 entry_price, 없으면 평균단가(계좌 pur_pric). 장부에 없으면 baseline(그날 정산 기준 장부 held). 모르면 unknown 에 넣고 뺌.
+    반환 {pnl, n, unknown, by_code}"""
+    tax = sb.SELL_TAX.get(int(year), 0.002) if year else 0.002
+    fee = sb.COMMISSION if commission is None else float(commission)
+    out, unknown, n = {}, [], 0
+    for r in records:
+        q, px = int(r.get("filled_qty") or 0), r.get("fill_price")
+        if r.get("side") != "sell" or q <= 0 or not px:
+            continue
+        c = r.get("code")
+        p = (held or {}).get(c) or (baseline or {}).get(c) or {}
+        entry = p.get("entry_price") or p.get("avg_price")
+        if not entry:
+            unknown.append(c)
+            continue
+        n += 1
+        amt, cost = float(px) * q, float(entry) * q
+        out[c] = out.get(c, 0.0) + amt - cost - kiwoom_fee(amt, fee) - kiwoom_tax(amt, tax) - kiwoom_fee(cost, fee)
+    return {"pnl": round(sum(out.values()), 1), "n": n, "unknown": sorted(set(unknown)), "by_code": {c: round(x, 1) for c, x in out.items()}}
+
+
+def fee_tolerance(records, commission=None, year=None):
+    """11W C6: 키움 체결 조회 비용(fee_won + tax_won) vs 규칙 계산 비용 비교 허용치 (원) = 1 + 체결 주문마다 [12원 (수수료 10원·세금 원 절사 경계)
+    + 수량 x (수수료율 + 세율) (체결가 원 끊김 1주당 1원 미만이 비용에 주는 차이)]. 현금 허용치(cash_tolerance, 수량 x 1원)와 달리 수량이 많아도 작음"""
+    tax = sb.SELL_TAX.get(int(year), 0.002) if year else 0.002
+    fee = sb.COMMISSION if commission is None else float(commission)
+    tol = 1.0
+    for r in records:
+        q = int(r.get("filled_qty") or 0)
+        if q > 0 and r.get("fill_price"):
+            tol += 12 + q * (fee + (tax if r.get("side") == "sell" else 0.0))
+    return round(tol, 1)
+
+
 def fill_amount(records, kind=None, side=None):
     """체결 금액 합 (kind·side 로 거름)"""
     return float(sum(float(r["fill_price"]) * int(r["filled_qty"]) for r in records if int(r.get("filled_qty") or 0) > 0 and r.get("fill_price")
@@ -523,7 +591,7 @@ def fill_amount(records, kind=None, side=None):
 
 def cash_tolerance(records):
     """11O: 현금 대조 허용치 (원) = 1 + 체결 주문마다 [체결 수량 x 1원 (ka10076 cntr_pric 는 주문의 평균 체결가를 원 단위로 끊은 값이라
-    여러 가격에 나눠 체결되면 1주당 1원 미만 차이, 2026-10-29 990011 156주 기록 2841 = 실제 평균 약 2841.51) + 10원 (수수료 10원 절사 경계)
+    여러 가격에 나눠 체결되면 1주당 1원 미만 차이, 2026-10-29 990015 156주 기록 2841 = 실제 평균 약 2841.51) + 10원 (수수료 10원 절사 경계)
     + 2원 (세금 원 절사 경계, 거래세·농특세 따로)]. 예전 20원 x 건수 + 1 은 체결가 끊김을 넣지 않아 수량이 많은 매도에서 넘침"""
     tol = 1.0
     for r in records:

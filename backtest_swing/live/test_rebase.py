@@ -5,6 +5,7 @@
 
   python -m unittest backtest_swing/live/test_rebase.py -v
 """
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import testguard; testguard.install()  # noqa: E401,E402,E702  (첫 줄 유지)
 import os  # noqa: E402
 os.environ["LIVE_CONFIG"] = "example"
 import json
@@ -327,12 +328,12 @@ class Update(Env):
 
 # ---------------------------------------------------------------- 15:30 판단의 그날 계수 + C 보유 종목 이벤트
 
-HELD = {"qty": 28, "trade_id": "990006-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 40000.0, "stop_basis": "진입일", "kind": "본래",
+HELD = {"qty": 28, "trade_id": "990010-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 40000.0, "stop_basis": "진입일", "kind": "본래",
         "judged_on": "2026-10-23", "close_1530": 45000.0}
 
 
 def pos_with(**kw):
-    return {"held": {"990006": {**HELD, **kw}}, "sell_duty": {}, "next_open_sells": {}, "trade_seq": 1, "duty_format": P.DUTY_FORMAT}
+    return {"held": {"990010": {**HELD, **kw}}, "sell_duty": {}, "next_open_sells": {}, "trade_seq": 1, "duty_format": P.DUTY_FORMAT}
 
 
 class Held(Base):
@@ -355,11 +356,11 @@ class Held(Base):
 
     def go(self, hms, **kw):
         P.save(self.R.POSITIONS, pos_with(**kw))
-        self.fk.balance_rows = [bal_row("990006", 28)]
+        self.fk.balance_rows = [bal_row("990010", 28)]
         return self.started(hms, live=False)
 
     def held(self):
-        return P.load(self.R.POSITIONS)[0]["held"]["990006"]
+        return P.load(self.R.POSITIONS)[0]["held"]["990010"]
 
     def test_ex_rights_no_false_stop_then_real_drop_stops(self):
         res = self.go("09:00:00")
@@ -369,11 +370,11 @@ class Held(Base):
         self.assertAlmostEqual(h["stop_price"], 40000.0 * 30000 / 45000, places=6)              # 26,667
         self.assertEqual((h["stop_adjust"][0]["stop_before"], round(h["stop_adjust"][0]["k"], 4)), (40000.0, 0.6667))
         self.assertEqual(h["qty"], 28)                                                           # 수량 그대로 (수동 확인 아님)
-        self.assertTrue(any(a.startswith("[이벤트 손절가 조정] 990006") for a in self.alerts))
+        self.assertTrue(any(a.startswith("[이벤트 손절가 조정] 990010") for a in self.alerts))
         self.q["price"] = 26000.0                                                                # 조정된 손절가 아래로 진짜 하락
         self.clk.at("09:01:00")
         res.stop_minute()
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990010"])
         self.assertAlmostEqual(self.held()["stop_price"], 26666.666667, places=3)               # 하루 한 번만 조정
 
     def test_premarket_adjusts_before_0900(self):
@@ -391,16 +392,16 @@ class Held(Base):
         for m in range(5):
             self.clk.at(f"09:0{m}:00")
             r = res.stop_minute()
-            self.assertEqual(r["base_paused"], ["990006"])
+            self.assertEqual(r["base_paused"], ["990010"])
         self.assertEqual(sends(self.fk, "kt10001"), [])                                         # 잘못 파는 것보다 멈춤
         self.assertEqual(self.held()["stop_price"], 40000.0)
-        warn = [a for a in self.alerts if a.startswith("[기준가 확인 못 함] 990006")]
+        warn = [a for a in self.alerts if a.startswith("[기준가 확인 못 함] 990010")]
         self.assertEqual(len(warn), 1)                                                          # 3분 넘으면 한 번
         self.q.update(base="45000", price=39000.0)                                              # 기준가 확인됨 (평소 날) -> 감시 다시, 진짜 손절
         self.clk.at("09:05:00")
         res.stop_minute()
-        self.assertTrue(any(a.startswith("[기준가 확인] 990006") for a in self.alerts))
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])
+        self.assertTrue(any(a.startswith("[기준가 확인] 990010") for a in self.alerts))
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990010"])
 
     def test_normal_day_stop_unchanged(self):
         self.q.update(base="45000", price=39000.0)
@@ -408,7 +409,7 @@ class Held(Base):
         res.stop_minute()
         h = self.held()
         self.assertEqual((h["stop_price"], h["base_check"]["adjusted"], h.get("stop_adjust")), (40000.0, False, None))
-        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990006"])
+        self.assertEqual([b[2]["stk_cd"] for b in sends(self.fk, "kt10001")], ["990010"])
         self.assertFalse(any(a.startswith("[이벤트 손절가 조정]") for a in self.alerts))
 
     def test_qty_review_not_adjusted(self):
@@ -455,13 +456,13 @@ class Held(Base):
     def test_day_bases_snapshot_then_base_check(self):
         res = self.go("15:40:00")
         f = os.path.join(self.tmp, "snap.parquet")
-        pd.DataFrame({"stk_cd": ["A990006"], "base_pric": ["30000"]}).to_parquet(f)
+        pd.DataFrame({"stk_cd": ["A990010"], "base_pric": ["30000"]}).to_parquet(f)
         res.day.set("live", {"snap_file": f})
-        self.assertEqual(res.day_bases(["990006"]), {"990006": 30000.0})
+        self.assertEqual(res.day_bases(["990010"]), {"990010": 30000.0})
         res.day.set("live", {})
         p = pos_with()
-        P.event_adjust(p["held"]["990006"], res.day.date, 30000.0, 45000.0, "시험", "09:00:00")
-        self.assertEqual(res.day_bases(["990006"], p), {"990006": 30000.0})                    # 스냅샷 없으면 오늘 확인한 기준가
+        P.event_adjust(p["held"]["990010"], res.day.date, 30000.0, 45000.0, "시험", "09:00:00")
+        self.assertEqual(res.day_bases(["990010"], p), {"990010": 30000.0})                    # 스냅샷 없으면 오늘 확인한 기준가
 
 
 class Approved(Base):

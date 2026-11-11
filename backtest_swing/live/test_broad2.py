@@ -3,6 +3,7 @@ Codex 확인(<커밋>..<커밋>) 반영(11J 보완, 2026-10-26) 재현 시험. �
 
   python -m unittest backtest_swing/live/test_broad2.py -v
 """
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import testguard; testguard.install()  # noqa: E401,E402,E702  (첫 줄 유지)
 import os  # noqa: E402
 os.environ["LIVE_CONFIG"] = "example"  # 11K 보완 8: 시험은 로컬 config.json 을 읽지 않음 (config.example.json 만)
 import json
@@ -23,7 +24,7 @@ import notify as N  # noqa: E402
 import orders as O  # noqa: E402
 import positions as P  # noqa: E402
 
-POS = {"990006": {"qty": 28, "trade_id": "990006-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 30000.0, "kind": "본래"}}
+POS = {"990010": {"qty": 28, "trade_id": "990010-2026-10-20-1", "entry_date": "2026-10-20", "stop_price": 30000.0, "kind": "본래"}}
 TRIG = O.new_duty("stop", "2026-10-26 09:30:00", "현재가 29900 < 손절가 30000", price=29900.0, stop=30000.0)   # 11J 보완 3: 종목 코드 단위 의무
 
 
@@ -37,8 +38,8 @@ def setup(t="2026-10-26 10:00:00"):
 
 def positions(duty=None, **extra):
     held = json.loads(json.dumps(POS))
-    held["990006"].update(extra)
-    return {"held": held, "sell_duty": {"990006": dict(duty)} if duty else {}, "next_open_sells": {}, "trade_seq": 1, "duty_format": P.DUTY_FORMAT}
+    held["990010"].update(extra)
+    return {"held": held, "sell_duty": {"990010": dict(duty)} if duty else {}, "next_open_sells": {}, "trade_seq": 1, "duty_format": P.DUTY_FORMAT}
 
 
 class Order(unittest.TestCase):
@@ -50,7 +51,7 @@ class Order(unittest.TestCase):
         log = []
         real = om.b.sell_market
         om.b.sell_market = lambda c, q: (log.append(("send", c, q)), real(c, q))[1]
-        fk.balance_rows = [bal_row("990006", 28, sellable=28), bal_row("005930", 10, sellable=10)]
+        fk.balance_rows = [bal_row("990010", 28, sellable=28), bal_row("005930", 10, sellable=10)]
         pos = positions(TRIG)
         pos["held"]["005930"] = {"qty": 10, "entry_date": "2026-10-20", "stop_price": 50000.0}
 
@@ -60,12 +61,12 @@ class Order(unittest.TestCase):
 
         def quote(codes, deadline=None):
             log.append(("quote", round(deadline - time.time(), 1)))
-            return {"990006": 31000.0, "005930": 49000.0}                          # 990006 반등, 005930 새로 손절
+            return {"990010": 31000.0, "005930": 49000.0}                          # 990010 반등, 005930 새로 손절
         r = O.stop_cycle(om, O.AccountWatch(), pos, quote, bal, clk(), set(), budget=10)
         # 11U: 시세 조회 먼저 (의무 전송 시간과 무관) -> 계좌 -> 새 손절 먼저 전송 -> 기존 의무
         self.assertEqual([x[0] for x in log], ["quote", "account", "send", "send"])
         self.assertEqual((log[2][1], log[2][2]), ("005930", 10))
-        self.assertEqual((log[3][1], log[3][2]), ("990006", 28))                 # 같은 분 계좌 매도 가능 수량
+        self.assertEqual((log[3][1], log[3][2]), ("990010", 28))                 # 같은 분 계좌 매도 가능 수량
         self.assertLessEqual(log[0][1], 10.0)                                     # 10초 상한은 시세 조회에
         self.assertEqual(r["triggered_new"].keys(), {"005930"})
 
@@ -79,14 +80,14 @@ class Order(unittest.TestCase):
             raise O.NoResponse("시간 상한")
         r = O.stop_cycle(om, O.AccountWatch(), pos, fail, fail, clk(), set(), budget=10)
         s = {c[2]["stk_cd"]: c[2]["ord_qty"] for c in sends(fk, "kt10001")}
-        self.assertEqual(s, {"990006": "28", "000660": "7"})                     # 계좌·시세 조회가 안 돼도 보유 파일 수량으로
+        self.assertEqual(s, {"990010": "28", "000660": "7"})                     # 계좌·시세 조회가 안 돼도 보유 파일 수량으로
         self.assertFalse(r["account_ok"])
         late = [i for i in om.records if i["stage"] == "trend_late"][0]
         self.assertEqual((late["qty_basis"][:5], late["not_open"]), ("보유 파일", True))
 
     def test_1_uses_same_minute_account_qty(self):
         clk, fk, om, _ = setup()
-        fk.balance_rows = [bal_row("990006", 28, sellable=20)]
+        fk.balance_rows = [bal_row("990010", 28, sellable=20)]
         O.stop_cycle(om, O.AccountWatch(), positions(TRIG), lambda cs: {}, lambda: fk.request("kt00018", "POST", "/x").json(),
                      clk(), set())
         self.assertEqual(sends(fk, "kt10001")[0][2]["ord_qty"], "20")            # 같은 분 계좌의 매도 가능 수량
@@ -97,9 +98,9 @@ class PreSave(Base):
 
     def test_2_crash_after_reject_then_rebound_restart(self):
         P.save(self.R.POSITIONS, positions())
-        self.fk.balance_rows = [bal_row("990006", 28)]
+        self.fk.balance_rows = [bal_row("990010", 28)]
         res = self.started("10:00:00", live=False)
-        self.quotes["990006"] = 29900.0
+        self.quotes["990010"] = 29900.0
         self.fk.script["kt10001"] = ["reject", "accept"]
 
         def crash_on_reject(msg):
@@ -109,8 +110,8 @@ class PreSave(Base):
         with self.assertRaises(Crash):
             res.stop_minute()
         self.assertEqual(len(sends(self.fk, "kt10001")), 1)
-        self.assertEqual(jl(self.R.POSITIONS)["sell_duty"]["990006"]["kind"], "stop")   # 전송 전에 저장돼 있음
-        self.quotes["990006"] = 31500.0                                            # 반등
+        self.assertEqual(jl(self.R.POSITIONS)["sell_duty"]["990010"]["kind"], "stop")   # 전송 전에 저장돼 있음
+        self.quotes["990010"] = 31500.0                                            # 반등
         res2 = self.started("10:05:00", live=False)                              # 재시작
         res2.stop_minute()
         self.assertEqual(len(sends(self.fk, "kt10001")), 2)                       # 그래도 다시 보냄
@@ -123,17 +124,17 @@ class DetectWindow(unittest.TestCase):
     def test_3_started_1520_quote_finished_1521(self):
         clk, fk, om, _ = setup("2026-10-26 15:20:50")
         start = clk()
-        fk.balance_rows = [bal_row("990006", 28)]
+        fk.balance_rows = [bal_row("990010", 28)]
 
         def slow_quote(codes, deadline=None):
             clk.at("15:21:05")                                                    # 조회가 늦게 끝남
-            return {"990006": 29900.0}
+            return {"990010": 29900.0}
         r = O.stop_cycle(om, O.AccountWatch(), positions(), slow_quote, lambda: fk.request("kt00018", "POST", "/x").json(), start, set(), budget=10)
-        self.assertEqual(r["triggered_new"]["990006"]["since"], "2026-10-26 15:20:50")
+        self.assertEqual(r["triggered_new"]["990010"]["since"], "2026-10-26 15:20:50")
         self.assertEqual(len(sends(fk, "kt10001")), 1)                            # 15:21:05 에 동시호가 시장가로 나감
         self.assertTrue(om.records[0]["closing_auction"])
         clk2, fk2, om2, _ = setup("2026-10-26 15:21:00")
-        r2 = O.stop_cycle(om2, O.AccountWatch(), positions(), lambda cs, deadline=None: {"990006": 29900.0},
+        r2 = O.stop_cycle(om2, O.AccountWatch(), positions(), lambda cs, deadline=None: {"990010": 29900.0},
                           lambda: fk2.request("kt00018", "POST", "/x").json(), clk2(), set(), budget=10)
         self.assertEqual(r2["triggered_new"], {})                                  # 15:21 에 시작한 감시는 감지 안 함
 
@@ -143,10 +144,10 @@ class Remainder(Base):
 
     def test_4_full_fill_with_holdings_left_sells_rest(self):
         clk, fk, om, _ = setup()
-        fk.balance_rows = [bal_row("990006", 28, sellable=20)]
+        fk.balance_rows = [bal_row("990010", 28, sellable=20)]
         pos = positions()
         bal = lambda: fk.request("kt00018", "POST", "/x").json()                   # noqa: E731
-        O.stop_cycle(om, O.AccountWatch(), pos, lambda cs, deadline=None: {"990006": 29900.0}, bal, clk(), set(), budget=10)
+        O.stop_cycle(om, O.AccountWatch(), pos, lambda cs, deadline=None: {"990010": 29900.0}, bal, clk(), set(), budget=10)
         first = om.records[0]
         self.assertEqual((first["qty"], first["status"]), (20, O.ACCEPTED))
         clk.at("10:01:00")
@@ -159,16 +160,16 @@ class Remainder(Base):
         s = sends(fk, "kt10001")
         self.assertEqual((len(s), s[-1][2]["ord_qty"]), (2, "8"))                 # 남은 8주로 계속 (계좌 매도 가능 수량)
         self.assertEqual(om.records[-1]["qty_basis"], "계좌 매도 가능 수량")
-        self.assertEqual(r["duties"], ["990006"])
+        self.assertEqual(r["duties"], ["990010"])
         clk.at("10:03:00")
         O.stop_cycle(om, O.AccountWatch(), pos, lambda cs, deadline=None: {}, bal, clk(), set(), budget=10)
         self.assertEqual(len(sends(fk, "kt10001")), 2)                            # 남은 주문 접수 뒤에는 다시 안 보냄
 
     def test_4_1535_left_holdings_go_to_next_open(self):
         P.save(self.R.POSITIONS, positions())
-        self.fk.balance_rows = [bal_row("990006", 28, sellable=20)]
+        self.fk.balance_rows = [bal_row("990010", 28, sellable=20)]
         res = self.started("10:00:00", live=False)
-        self.quotes["990006"] = 29900.0
+        self.quotes["990010"] = 29900.0
         res.stop_minute()
         it = res.om.records[0]
         self.fk.fill(it["ord_no"], 20, 29900, "10:00:10")                          # 다 체결, 8주는 매도 가능 0 으로 남음
@@ -176,8 +177,8 @@ class Remainder(Base):
         res.close_check()
         self.assertEqual(res.om.records[0]["fill_status"], "체결")
         nos = jl(self.R.POSITIONS)["next_open_sells"]
-        self.assertIn("990006", nos)
-        self.assertIn("8주 남음", nos["990006"]["reason"])
+        self.assertIn("990010", nos)
+        self.assertIn("8주 남음", nos["990010"]["reason"])
 
 
 class AlertsLog(unittest.TestCase):
@@ -192,14 +193,14 @@ class AlertsLog(unittest.TestCase):
 
     def test_6_logged_on_enqueue_result_separate_resend_next_start(self):
         gate = threading.Event()
-        n = N.send_async("[손절 진행 중] 990006", log_path=self.log, sender=lambda t: gate.wait(5) and False, pending_path=self.pend)
+        n = N.send_async("[손절 진행 중] 990010", log_path=self.log, sender=lambda t: gate.wait(5) and False, pending_path=self.pend)
         with open(self.log, encoding="utf-8") as f:
-            self.assertIn(f"[#{n}] [손절 진행 중] 990006", f.read())              # 보내기 전에 이미 기록
+            self.assertIn(f"[#{n}] [손절 진행 중] 990010", f.read())              # 보내기 전에 이미 기록
         gate.set()
         N.flush(5, pending_path=self.pend)
         with open(self.log, encoding="utf-8") as f:
             self.assertIn(f"-> [#{n}] 텔레그램 보내지 못함", f.read())              # 전송 결과는 따로 한 줄
-        self.assertEqual([x["text"] for x in jl(self.pend).values()], ["[손절 진행 중] 990006"])
+        self.assertEqual([x["text"] for x in jl(self.pend).values()], ["[손절 진행 중] 990010"])
         got = []
         run, N._RUN = N._RUN, "next-start"                                        # 다음 시작 (새 실행 = 지난 실행의 번호를 다시 보냄)
         try:
@@ -208,7 +209,7 @@ class AlertsLog(unittest.TestCase):
             N._RUN = run
         N.flush(5)
         self.assertTrue(got[0].startswith("[지난 미전송 알림] 1건"))
-        self.assertIn("990006", got[0])
+        self.assertIn("990010", got[0])
         self.assertFalse(os.path.exists(self.pend))                              # 보낸 번호를 지워 비면 파일도 지움
 
     def test_6_unsent_at_exit_saved(self):

@@ -4,6 +4,7 @@ Codex 확인 리뷰(11F, 2026-10-24) 시험: N1 ~ N3, 5, 7, 15, 16, 26, 27 보�
 
   python -m unittest backtest_swing/live/test_confirm.py -v
 """
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import testguard; testguard.install()  # noqa: E401,E402,E702  (첫 줄 유지)
 import os  # noqa: E402
 os.environ["LIVE_CONFIG"] = "example"  # 11K 보완 8: 시험은 로컬 config.json 을 읽지 않음 (config.example.json 만)
 import json
@@ -47,18 +48,18 @@ class Confirm(Base):
     def test_N1_recovery_spans_days_since_last_settled_with_missed_day(self):
         day_state(self.tmp, "2026-10-20", self.clk, steps=("after_close",))
         day_state(self.tmp, "2026-10-21", self.clk, steps=("settle",))                      # 정산 미완료
-        intents_file(self.tmp, "2026-10-21", [{"intent_id": "a1", "date": "2026-10-21", "stage": "buy", "side": "buy", "code": "990006", "qty": 28,
+        intents_file(self.tmp, "2026-10-21", [{"intent_id": "a1", "date": "2026-10-21", "stage": "buy", "side": "buy", "code": "990010", "qty": 28,
                                               "status": "UNKNOWN", "kind": "본래"}])
         # 10-22 는 실행 안 한 날 (상태·의도 파일 없음)
         day_state(self.tmp, "2026-10-23", self.clk, steps=("ac_summary",))
-        self.fk.balance_rows = [bal_row("990006", 28, avg=10000)]
+        self.fk.balance_rows = [bal_row("990010", 28, avg=10000)]
         res = self.started("07:10:00")
         res.day.s["steps"].pop("prev_settle")
         r = res.prev_settle()
         self.assertEqual((r["incomplete_days"], r["missed_days"], r["settled"]), (["2026-10-21", "2026-10-22", "2026-10-23"], ["2026-10-22"], 1))
         self.assertEqual(r["days"], ["2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23"])   # 최근 5거래일도 봄
         self.assertEqual(jl(os.path.join(self.tmp, "intents", "2026-10-21.json"))[0]["status"], O.ACCEPTED)   # 앞날 UNKNOWN 을 계좌로 확정
-        p = jl(self.R.POSITIONS)["held"]["990006"]
+        p = jl(self.R.POSITIONS)["held"]["990010"]
         self.assertEqual((p["entry_date"], p["stop_temp"]), ("2026-10-21", True))                                 # 의도 날짜가 진입일
         for x in ("2026-10-21", "2026-10-23"):
             self.assertTrue(S.Day(os.path.join(self.tmp, f"{x}.json"), x).done("after_close"))
@@ -70,9 +71,9 @@ class Confirm(Base):
     # ---------------------------------------------------------------- 5
     def test_5_unfinished_recovery_blocks_buys_stop_continues(self):
         day_state(self.tmp, "2026-10-23", self.clk, steps=("ac_summary",))
-        intents_file(self.tmp, "2026-10-23", [{"intent_id": "p1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "990006", "qty": 28,
+        intents_file(self.tmp, "2026-10-23", [{"intent_id": "p1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "990010", "qty": 28,
                                               "status": "ACCEPTED", "kind": "본래"}])
-        self.fk.balance_rows = [bal_row("990006", 28, avg=10000)]
+        self.fk.balance_rows = [bal_row("990010", 28, avg=10000)]
         res = self.started("09:00:00")
         res.day.s["steps"].pop("prev_settle")
         res.prev_settle()
@@ -81,13 +82,13 @@ class Confirm(Base):
         self.assertIn("전날 복구 미완료", gate)
         self.assertIn("임시 거래 정보", gate)
         self.clk.at("10:00:00")
-        self.quotes["990006"] = 9100.0
+        self.quotes["990010"] = 9100.0
         res.stop_minute()                                                    # 임시 손절가(9150)로 손절은 계속
         self.assertEqual(len(sends(self.fk, "kt10001")), 1)
         self.clk.at("15:22:00")
         self.assertEqual(res.buy()["sent"], 0)
         self.assertEqual(len(sends(self.fk)), 0)
-        self.judged["990006"] = {"close": 10500.0, "stop": 9800.0, "trend": False, "basis": "수정주가 일봉"}
+        self.judged["990010"] = {"close": 10500.0, "stop": 9800.0, "trend": False, "basis": "수정주가 일봉"}
         res.finalize_recovery()
         gate = "; ".join(res.buy_gate())
         self.assertNotIn("전날 복구 미완료", gate)
@@ -105,13 +106,13 @@ class Confirm(Base):
         self.assertEqual(res.day.status("close_check"), S.FAILED)
         self.clk.at("15:40:10")
         res.settle()
-        self.assertEqual(res.day.s["settlement"]["account"], {"990006": 28})  # 계좌 수량은 확정
-        self.cv["990006"] = {"close": 33500}
-        self.judged["990006"] = {"close": 33500.0, "stop": 31000.0, "trend": True, "basis": "수정주가 일봉"}
+        self.assertEqual(res.day.s["settlement"]["account"], {"990010": 28})  # 계좌 수량은 확정
+        self.cv["990010"] = {"close": 33500}
+        self.judged["990010"] = {"close": 33500.0, "stop": 31000.0, "trend": True, "basis": "수정주가 일봉"}
         self.clk.at("15:40:30")
         S.run_step(res.day, "ac_positions", res.ac_positions, max_attempts=60)
         self.assertEqual(res.day.status("ac_positions"), S.FAILED)
-        p = jl(self.R.POSITIONS)["held"]["990006"]
+        p = jl(self.R.POSITIONS)["held"]["990010"]
         self.assertTrue(p["provisional_new"] and p["info_pending"] and p["stop_temp"])
         self.assertEqual(p["qty"], 28)
         gate = "; ".join(res.buy_gate())
@@ -120,38 +121,38 @@ class Confirm(Base):
         self.clk.at("16:00:00")                                                # 체결 조회 성공 -> 다시 확정
         S.run_step(res.day, "ac_positions", res.ac_positions, max_attempts=60)
         self.assertEqual(res.day.status("ac_positions"), S.SUCCEEDED)
-        p = jl(self.R.POSITIONS)["held"]["990006"]
-        self.assertEqual((p["trade_id"], p["stop_price"], p["stop_temp"], p["kind"]), ("990006-2026-10-26-1", 31000.0, False, "본래"))
+        p = jl(self.R.POSITIONS)["held"]["990010"]
+        self.assertEqual((p["trade_id"], p["stop_price"], p["stop_temp"], p["kind"]), ("990010-2026-10-26-1", 31000.0, False, "본래"))
         self.assertFalse(p.get("provisional_new") or p.get("info_pending"))
         self.assertTrue(res.day.s["positions_unconfirmed"]["resolved_at"])
         self.assertNotIn("거래 정보 미확정", "; ".join(res.buy_gate()))
 
     def test_N2_unconfirmed_next_morning_recovery_uses_intents(self):
-        P.save(self.R.POSITIONS, {"held": {"990006": {"qty": 28, "trade_id": "990006-2026-10-23-1", "entry_date": "2026-10-23", "kind": "미확인",
+        P.save(self.R.POSITIONS, {"held": {"990010": {"qty": 28, "trade_id": "990010-2026-10-23-1", "entry_date": "2026-10-23", "kind": "미확인",
                                                       "stop_price": 9150.0, "stop_temp": True, "provisional_new": True, "info_pending": True}},
                                   "next_open_sells": {}, "trade_seq": 1})
         day_state(self.tmp, "2026-10-23", self.clk, steps=("settle", "ac_summary"))
-        intents_file(self.tmp, "2026-10-23", [{"intent_id": "b1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "990006", "qty": 28,
+        intents_file(self.tmp, "2026-10-23", [{"intent_id": "b1", "date": "2026-10-23", "stage": "buy", "side": "buy", "code": "990010", "qty": 28,
                                               "status": "ACCEPTED", "ord_no": "B1", "kind": "점검용"}])
-        self.fk.balance_rows = [bal_row("990006", 28, avg=33000)]
+        self.fk.balance_rows = [bal_row("990010", 28, avg=33000)]
         res = self.started("07:10:00")
         res.day.s["steps"].pop("prev_settle")
         res.prev_settle()
-        p = jl(self.R.POSITIONS)["held"]["990006"]
-        self.assertEqual((p["trade_id"], p["kind"], p["entry_date"]), ("990006-2026-10-23-1", "점검용", "2026-10-23"))
+        p = jl(self.R.POSITIONS)["held"]["990010"]
+        self.assertEqual((p["trade_id"], p["kind"], p["entry_date"]), ("990010-2026-10-23-1", "점검용", "2026-10-23"))
         self.assertFalse(p.get("provisional_new") or p.get("info_pending") or p.get("entry_temp"))
         self.assertTrue(p["stop_temp"])                                       # 손절가는 준비 뒤 공식 일봉으로 (finalize)
 
     # ---------------------------------------------------------------- 18: 보유 있는 계좌, 하위 단계 저장 중 종료
     def test_kill_while_saving_positions_with_holdings_then_restart(self):
-        P.save(self.R.POSITIONS, {"held": {"990006": {"qty": 28, "trade_id": "990006-2026-10-20-1", "entry_date": "2026-10-20", "kind": "본래",
+        P.save(self.R.POSITIONS, {"held": {"990010": {"qty": 28, "trade_id": "990010-2026-10-20-1", "entry_date": "2026-10-20", "kind": "본래",
                                                       "stop_price": 30000.0}}, "next_open_sells": {}, "trade_seq": 1})
         intents_file(self.tmp, "2026-10-26", [{"intent_id": "b1", "date": "2026-10-26", "stage": "buy", "side": "buy", "code": "005930", "qty": 10,
                                               "price": 60000, "status": "ACCEPTED", "ord_no": "B1", "filled_qty": 10, "fill_price": 60000.0,
                                               "fill_status": "체결", "kind": "본래", "assumed_kind": "buy", "trde_tp": "0", "pre_qty": 0}])
-        self.fk.balance_rows = [bal_row("990006", 28, avg=33000), bal_row("005930", 10, avg=60000)]
-        self.cv.update({"990006": {"open": 33500, "close": 34000}, "005930": {"open": 60500, "close": 61000}})
-        self.judged.update({"990006": {"close": 34000.0, "stop": 32000.0, "trend": True, "basis": "수정주가 일봉"},
+        self.fk.balance_rows = [bal_row("990010", 28, avg=33000), bal_row("005930", 10, avg=60000)]
+        self.cv.update({"990010": {"open": 33500, "close": 34000}, "005930": {"open": 60500, "close": 61000}})
+        self.judged.update({"990010": {"close": 34000.0, "stop": 32000.0, "trend": True, "basis": "수정주가 일봉"},
                             "005930": {"close": 61000.0, "stop": 57000.0, "trend": False, "basis": "수정주가 일봉"}})
         saved_save = P.save
 
@@ -178,8 +179,8 @@ class Confirm(Base):
         for s in ("settle", "ac_positions", "ac_ledger", "ac_summary", "after_close"):
             self.assertTrue(res2.day.done(s), s)
         held = jl(self.R.POSITIONS)["held"]
-        self.assertEqual((held["990006"]["trade_id"], held["990006"]["stop_price"], held["990006"]["trend_sell_next_open"]),
-                         ("990006-2026-10-20-1", 30000.0, True))
+        self.assertEqual((held["990010"]["trade_id"], held["990010"]["stop_price"], held["990010"]["trend_sell_next_open"]),
+                         ("990010-2026-10-20-1", 30000.0, True))
         self.assertEqual((held["005930"]["trade_id"], held["005930"]["stop_price"], held["005930"]["trend_sell_next_open"]),
                          ("005930-2026-10-26-2", 57000.0, False))                # 기준 장부에서 다시 계산 (거래 번호 중복 없음)
         self.assertEqual(res2.day.s["steps"]["settle"]["attempts"], 1)
@@ -215,22 +216,22 @@ class Confirm(Base):
 
     # ---------------------------------------------------------------- N3
     def test_N3_trend_sell_after_0831_recovery(self):
-        P.save(self.R.POSITIONS, {"held": {"990006": {"qty": 10, "entry_date": "2026-10-20", "stop_price": 1.0}}, "next_open_sells": {}})
-        self.fk.balance_rows = [bal_row("990006", 10)]
+        P.save(self.R.POSITIONS, {"held": {"990010": {"qty": 10, "entry_date": "2026-10-20", "stop_price": 1.0}}, "next_open_sells": {}})
+        self.fk.balance_rows = [bal_row("990010", 10)]
         res = self.started("08:30:05")
         res.tick(self.clk())
         self.assertTrue(res.day.done("trend_sell"))
         self.assertEqual(len(sends(self.fk, "kt10001")), 0)
         pos = jl(self.R.POSITIONS)                                            # 08:31 전날 복구 마무리가 추세 판정을 넣음
         pos = P.normalize(pos)
-        pos["held"]["990006"].update(trend_sell_next_open=True, judged_on="2026-10-23", judged_by="공식 일봉 (다음 날 복구)")
-        res.mark_trend(pos, "990006", "2026-10-23", "공식 일봉 (다음 날 복구)")    # 복구 마무리와 같게 (11J 보완 3: 매도 의무 + 목록)
+        pos["held"]["990010"].update(trend_sell_next_open=True, judged_on="2026-10-23", judged_by="공식 일봉 (다음 날 복구)")
+        res.mark_trend(pos, "990010", "2026-10-23", "공식 일봉 (다음 날 복구)")    # 복구 마무리와 같게 (11J 보완 3: 매도 의무 + 목록)
         P.save(self.R.POSITIONS, pos)
         for hms in ("08:31:00", "08:31:30", "08:32:00", "08:33:00"):
             self.clk.at(hms)
             res.tick(self.clk())
         self.assertEqual(len(sends(self.fk, "kt10001")), 1)                   # 한 번만 (의도 기록으로 중복 막음)
-        self.assertIn("990006", jl(self.R.POSITIONS)["next_open_sells"])
+        self.assertIn("990010", jl(self.R.POSITIONS)["next_open_sells"])
 
     # ---------------------------------------------------------------- 16
     def test_16_summary_row_without_snapshot(self):
@@ -301,7 +302,7 @@ class Ops(Base):
             S.run_step(res.day, "ac_positions", res.ac_positions, max_attempts=60)
         lines = self.log_lines()
         text = "\n".join(lines)
-        for want in ("하루 시작(핵심)", "주문 전송: buy buy 990006 28주", "주문 ACCEPTED: buy buy 990006", "체결: buy buy 990006 28주 @33350 체결 28주 @33000",
+        for want in ("하루 시작(핵심)", "주문 전송: buy buy 990010 28주", "주문 ACCEPTED: buy buy 990010", "체결: buy buy 990010 28주 @33350 체결 28주 @33000",
                      "단계 시작: close_check", "단계 끝: close_check 성공"):
             self.assertIn(want, text)
         self.assertTrue(all(len(x.split(" ", 3)) == 4 and x.split(" ")[2] in ("INFO", "WARN", "ERROR") for x in lines))
@@ -322,6 +323,7 @@ class Ops(Base):
         res.tick = lambda t: "idle"
         R.time.sleep = lambda s: open(R.stop_flag(), "w").close()                # 첫 반복 뒤 정지 요청
         res.run()                                                                 # 반환 = 정상 종료
+        self.assertIsNone(res.bot)                                                # 11W: 시험 보호로 토큰 없음 -> 조회 명령 스레드 없음 (예전: 실제 getUpdates)
         self.assertTrue(any("정상 종료" in a for a in self.alerts))
         self.assertFalse(os.path.exists(R.CFG["pid_file"]))
         lk = C.SingleInstanceLock(R.RESIDENT_LOCK)

@@ -6,6 +6,7 @@ A: OpenBLAS 1 스레드 환경 변수가 작업 프로세스에 물려지는지,
 
   python -m unittest backtest_swing/live/test_memcash.py -v
 """
+import os, sys; sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); import testguard; testguard.install()  # noqa: E401,E402,E702  (첫 줄 유지)
 import os  # noqa: E402
 os.environ["LIVE_CONFIG"] = "example"  # 11K 보완 8: 시험은 로컬 config.json 을 읽지 않음 (config.example.json 만)
 import multiprocessing as mp
@@ -243,10 +244,10 @@ class PoolLifecycle(Base):
 # ---------------------------------------------------------------- B 현금 대조 (2026-10-29 숫자)
 
 PREV_D2, ACTUAL_D2 = 10_000_000.0, 8_521_159.0  # 공개 사본: 계좌 금액·체결 값은 같은 계산이 성립하는 가짜 값
-FILLS_1029 = [{"side": "sell", "code": "990011", "filled_qty": 156, "fill_price": 2841.0},    # 시장가 손절: 실제 평균 약 2841.51 (기록은 끊긴 값)
+FILLS_1029 = [{"side": "sell", "code": "990015", "filled_qty": 156, "fill_price": 2841.0},    # 시장가 손절: 실제 평균 약 2841.51 (기록은 끊긴 값)
               {"side": "buy", "code": "990003", "filled_qty": 1, "fill_price": 447500.0},
-              {"side": "buy", "code": "990008", "filled_qty": 18, "fill_price": 41250.0},
-              {"side": "buy", "code": "990005", "filled_qty": 1, "fill_price": 723000.0}]
+              {"side": "buy", "code": "990012", "filled_qty": 18, "fill_price": 41250.0},
+              {"side": "buy", "code": "990008", "filled_qty": 1, "fill_price": 723000.0}]
 
 
 class Cash(Base):

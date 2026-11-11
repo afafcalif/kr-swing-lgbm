@@ -94,9 +94,10 @@ def alert_once(flag, text, value):
 
 
 def save_pending(items):
+    """11W B7: 원자적 저장 (common.atomic_json: 임시 파일에 쓰고 교체) — 쓰는 도중 꺼져도 이전 목록이 남음"""
     if items:
-        with open(st("pending"), "w", encoding="utf-8") as f:
-            json.dump(items, f, ensure_ascii=False)
+        from common import atomic_json
+        atomic_json(st("pending"), items)
     elif os.path.exists(st("pending")):
         os.remove(st("pending"))
 
